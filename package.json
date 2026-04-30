@@ -1,14 +1,13 @@
 {
-  "name": "phoenix-bot",
-  "version": "2.0.0",
-  "description": "AI-powered trading bot for Phoenix perpetuals — multi-strategy swarm",
+  "name": "phoenix-terminal",
+  "version": "3.0.0",
+  "description": "Cyberpunk trading terminal for Phoenix perpetuals — web-only swarm bot",
+  "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --experimental-vm-modules src/bot.js",
-    "paper": "TRADING_MODE=paper node --experimental-vm-modules src/bot.js",
-    "analyze": "node --experimental-vm-modules src/analyze.js",
-    "backtest": "node --experimental-vm-modules src/backtest.js",
-    "journal": "node --experimental-vm-modules src/journal.js"
+    "dev": "cd web && npm run dev",
+    "build": "cd web && npm run build",
+    "start": "cd web && npm start"
   },
   "engines": {
     "node": ">=20"

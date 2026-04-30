@@ -3,7 +3,7 @@
 import fs from "fs";
 import path from "path";
 
-const STATE_FILE = path.join(process.cwd(), "data", "risk-state.json");
+const STATE_FILE = path.join(process.cwd(), "..", "data", "risk-state.json");
 
 export class RiskManager {
   constructor(config = {}) {
@@ -27,17 +27,13 @@ export class RiskManager {
   }
 
   // ─── Position Sizing ─────────────────────────────────────
-  
-  calculatePositionSize(entryPrice, stopLoss, leverage = 1) {
-    const riskPerTrade = this.portfolioValue * (this.maxPositionPct / 100);
-    const priceRisk = Math.abs(entryPrice - stopLoss);
-    if (priceRisk === 0) return 0;
-    
-    const baseSize = riskPerTrade / priceRisk;
-    const leveragedSize = baseSize * leverage;
-    const maxSize = (this.portfolioValue * this.maxPositionPct / 100) * leverage / entryPrice;
-    
-    return Math.min(leveragedSize, maxSize);
+  // margin = portfolio × maxPositionPct%
+  // notional = margin × leverage
+  // units = notional / entryPrice
+  calculatePositionSize(entryPrice, leverage = 1) {
+    const margin = this.portfolioValue * (this.maxPositionPct / 100);
+    const notional = margin * leverage;
+    return notional / entryPrice;
   }
 
   // ─── Trade Validation ────────────────────────────────────
@@ -87,7 +83,7 @@ export class RiskManager {
       reasons,
       leverage,
       positionSize: reasons.length === 0 ? this.calculatePositionSize(
-        signal.entryPrice, signal.stopLoss, leverage
+        signal.entryPrice, leverage
       ) : 0,
     };
   }

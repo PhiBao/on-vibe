@@ -1,7 +1,7 @@
 // Backtesting Engine — Vibe-Trading CryptoEngine pattern
 // Models: funding fees (8h), liquidation, maker/taker fees, slippage
 
-import { TrendFollowing, MeanReversion, Momentum, SRBounce, VolumeBreakout, synthesizeSignals } from "../analysis/signals.js";
+import { TrendFollowing, MeanReversion, Momentum, SRBounce, VolumeBreakout, synthesizeSignals } from "./signals.js";
 
 export class Backtester {
   constructor(config = {}) {

@@ -228,7 +228,10 @@ export function VolumeBreakout(candles) {
 }
 
 // ─── Swarm Synthesizer (combines all strategies) ───────────
-export function synthesizeSignals(strategies, currentPrice) {
+// options: { maxLeverage: number }
+export function synthesizeSignals(strategies, currentPrice, options = {}) {
+  const maxLeverage = options.maxLeverage || 1;
+
   // Weight by confidence
   let weightedSignal = 0;
   let totalWeight = 0;
@@ -242,10 +245,13 @@ export function synthesizeSignals(strategies, currentPrice) {
     details.push({ name: s.name, signal: s.signal.toFixed(2), confidence: s.confidence.toFixed(2) });
   }
 
-  const finalSignal = totalWeight > 0 ? weightedSignal / totalWeight : 0;
-  const avgConfidence = totalWeight > 0 ? totalWeight / strategies.length : 0;
+  const activeStrategies = strategies.filter(s => s.signal !== 0);
+  const activeCount = activeStrategies.length;
 
-  // Agreement bonus: if all strategies agree direction
+  const finalSignal = totalWeight > 0 ? weightedSignal / totalWeight : 0;
+  const avgConfidence = activeCount > 0 ? totalWeight / activeCount : 0;
+
+  // Agreement bonus: if 3+ strategies agree direction
   const longCount = strategies.filter(s => s.signal > 0.3).length;
   const shortCount = strategies.filter(s => s.signal < -0.3).length;
   const agreementBonus = Math.max(longCount, shortCount) >= 3 ? 0.15 : 0;
@@ -276,7 +282,7 @@ export function synthesizeSignals(strategies, currentPrice) {
     entryPrice: currentPrice,
     stopLoss,
     takeProfit,
-    leverage: adjustedConfidence > 0.75 ? 3 : adjustedConfidence > 0.6 ? 2 : 1,
+    leverage: maxLeverage, // use config leverage directly
     details,
     longVotes: longCount,
     shortVotes: shortCount,

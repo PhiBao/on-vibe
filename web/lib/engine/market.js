@@ -7,7 +7,7 @@ export async function initPhoenix() {
   
   client = createPhoenixClient({
     apiUrl: "https://perp-api.phoenix.trade",
-    rpcUrl: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
+    rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://api.mainnet-beta.solana.com",
     exchangeMetadata: { stream: false },
   });
 
@@ -99,7 +99,7 @@ export async function getMidPrice(symbol) {
 export async function buildLimitOrder(symbol, side, priceUsd, baseUnits) {
   const c = getClient();
   return c.orderPackets.buildLimitOrderPacket({
-    symbol: `${symbol}-PERP`,
+    symbol,
     side: side === "buy" ? Side.Bid : Side.Ask,
     priceUsd: String(priceUsd),
     baseUnits: String(baseUnits),
@@ -109,7 +109,7 @@ export async function buildLimitOrder(symbol, side, priceUsd, baseUnits) {
 export async function buildMarketOrder(symbol, side, baseUnits) {
   const c = getClient();
   return c.orderPackets.buildMarketOrderPacket({
-    symbol: `${symbol}-PERP`,
+    symbol,
     side: side === "buy" ? Side.Bid : Side.Ask,
     baseUnits: String(baseUnits),
   });
@@ -118,7 +118,7 @@ export async function buildMarketOrder(symbol, side, baseUnits) {
 export async function buildStopLoss(symbol, side, triggerPrice) {
   const c = getClient();
   return c.ixs.buildPlaceStopLoss({
-    symbol: `${symbol}-PERP`,
+    symbol,
     tradeSide: side === "buy" ? Side.Bid : Side.Ask,
     executionDirection: side === "buy" ? Direction.LessThan : Direction.GreaterThan,
     triggerPrice: BigInt(Math.round(triggerPrice * 1e6)),

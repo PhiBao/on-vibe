@@ -1,36 +1,77 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🔥 Phoenix Terminal v3
 
-## Getting Started
+AI-powered multi-strategy trading terminal for Phoenix perpetuals on Solana. Connect your wallet, configure the swarm bot, and trade entirely through the browser.
 
-First, run the development server:
+## Quick Start
 
 ```bash
+cd web
+npm install --legacy-peer-deps
+
+# Copy environment template
+cp .env.example .env.local
+
+# Start dev server
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000 and connect your Solana wallet.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+> **Note:** Environment variables must be in `web/.env.local`. Next.js reads env from the project root (`web/`), not the repository root.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Environment Setup
 
-## Learn More
+```bash
+cp .env.example .env.local
+```
 
-To learn more about Next.js, take a look at the following resources:
+Edit `web/.env.local`:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `NEXT_PUBLIC_RPC_URL` | yes | mainnet-beta | Solana RPC endpoint (used by frontend + API) |
+| `NEXT_PUBLIC_WC_PROJECT_ID` | no | — | WalletConnect project ID |
+| `SYMBOLS` | no | SOL,ETH,BTC | Markets to scan |
+| `SCAN_INTERVAL` | no | 60 | Seconds between bot cycles |
+| `MIN_CONFIDENCE` | no | 0.55 | Min confidence to generate signal |
+| `MAX_POSITION_PCT` | no | 5 | Max % of portfolio per trade |
+| `MAX_LEVERAGE` | no | 20 | Max leverage (Phoenix limit) |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Usage
 
-## Deploy on Vercel
+1. **Connect wallet** — Click "[ CONNECT WALLET ]" in the sidebar
+2. **Configure bot** — Go to **Bots**, select markets, set confidence & leverage
+3. **Start bot** — Click "[ START BOT ]" to begin scanning
+4. **Execute signals** — When signals appear, click "[ EXECUTE ]" to sign the trade
+5. **Monitor positions** — Track PnL in **Positions** and **Dashboard**
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Project Structure
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```
+web/
+├── app/              # Pages + API routes
+│   ├── page.tsx      # Dashboard
+│   ├── trade/        # Manual trading
+│   ├── bots/         # Bot control + signals
+│   ├── positions/    # Position monitor
+│   ├── journal/      # Performance analytics
+│   ├── backtest/     # Backtest UI
+│   └── api/          # API routes
+├── components/       # TerminalLayout, WalletProvider
+├── lib/
+│   ├── security.ts   # Security auditor
+│   ├── bot-signals.ts # Signal queue manager
+│   └── engine/       # Trading engine
+│       ├── market.js # Phoenix SDK wrapper
+│       ├── signals.js # 5 strategies
+│       ├── risk.js   # Risk management
+│       └── backtest.js # Backtest engine
+```
+
+## Disclaimer
+
+This is experimental software. Trading crypto perpetuals involves **substantial risk of loss**. All transactions are signed by your wallet and executed on-chain. Use at your own risk. Never trade with funds you can't afford to lose.
+
+## License
+
+MIT

@@ -28,10 +28,10 @@ export default function WalletContextProvider({ children }: { children: ReactNod
         options: {
           projectId: process.env.NEXT_PUBLIC_WC_PROJECT_ID || "c4f79cc821944d9680842e34466bfb",
           metadata: {
-            name: "Phoenix Bot",
-            description: "AI Trading Dashboard for Phoenix Perps",
-            url: "https://phoenix-bot.dev",
-            icons: ["https://phoenix-bot.dev/icon.png"],
+            name: "Phoenix Terminal",
+            description: "Cyberpunk trading terminal for Phoenix Perps",
+            url: "https://phoenix-terminal.dev",
+            icons: ["https://phoenix-terminal.dev/icon.png"],
           },
         },
       }),
