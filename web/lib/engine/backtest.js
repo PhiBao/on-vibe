@@ -90,7 +90,7 @@ export class Backtester {
           SRBounce(lookback),
           VolumeBreakout(lookback),
         ];
-        const signal = synthesizeSignals(strategies, bar.close);
+        const signal = synthesizeSignals(strategies, bar.close, { maxLeverage: this.leverage });
 
         if (signal.action !== "hold" && signal.confidence > 0.55) {
           const riskAmount = capital * this.maxPositionPct;

@@ -1,32 +1,8 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
-import path from "path";
-
-const DATA_DIR = path.join(process.cwd(), "..", "data");
-
-function readJsonl(file: string) {
-  try {
-    const fp = path.join(DATA_DIR, file);
-    if (!fs.existsSync(fp)) return [];
-    return fs.readFileSync(fp, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
-  } catch {
-    return [];
-  }
-}
-
-function readJson(file: string) {
-  try {
-    const fp = path.join(DATA_DIR, file);
-    if (!fs.existsSync(fp)) return null;
-    return JSON.parse(fs.readFileSync(fp, "utf8"));
-  } catch {
-    return null;
-  }
-}
+import { readRiskState } from "@/lib/data-store";
 
 export async function GET() {
-  const trades = readJsonl("trades.jsonl");
-  const state = readJson("risk-state.json") || {};
+  const state = readRiskState() || {};
 
   const history = state.tradeHistory || [];
   const wins = history.filter((t: { pnl: number }) => t.pnl > 0);
@@ -57,6 +33,5 @@ export async function GET() {
     },
     positions: state.openPositions || [],
     recentTrades: history.slice(-20).reverse(),
-    allOrders: trades.slice(-50).reverse(),
   });
 }

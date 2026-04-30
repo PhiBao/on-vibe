@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { readSignals, expireOldSignals } from "@/lib/bot-signals";
+import { expireOldSignals, readPendingSignals } from "@/lib/data-store";
 
 export async function GET() {
-  expireOldSignals(300000); // expire signals older than 5 minutes
-  const signals = readSignals();
+  expireOldSignals(300000);
+  const signals = readPendingSignals();
   return NextResponse.json({ signals, count: signals.length });
 }

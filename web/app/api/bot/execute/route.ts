@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createPhoenixClient, Side, symbol as phoenixSymbol } from "@ellipsis-labs/rise";
 import { address } from "@solana/kit";
 import { defaultAuditor } from "@/lib/security";
-import { markSignalExecuted, readSignals } from "@/lib/bot-signals";
+import { markSignalExecuted, readPendingSignals } from "@/lib/data-store";
 import { serializeInstruction } from "@/lib/phoenix-tx";
 
 export async function POST(request: Request) {
@@ -13,7 +13,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
 
-  const pending = readSignals();
+  const pending = readPendingSignals();
   const sig = pending.find((s) => s.id === signalId);
   if (!sig) {
     return NextResponse.json({ error: "Signal not found or already processed" }, { status: 410 });

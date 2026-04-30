@@ -3,7 +3,7 @@ import { useState } from "react";
 
 export default function BacktestPage() {
   const [symbol, setSymbol] = useState("SOL");
-  const [leverage, setLeverage] = useState(2);
+  const [leverage, setLeverage] = useState(20);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<{ error?: string; totalReturn?: string; sharpe?: string; sortino?: string; maxDrawdown?: string; winRate?: string; profitFactor?: string; totalTrades?: number; avgWin?: string; avgLoss?: string; finalCapital?: string } | null>(null);
 
@@ -55,8 +55,8 @@ export default function BacktestPage() {
           </div>
           <div>
             <label className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em] mb-2 block">Leverage: {leverage}x</label>
-            <input type="range" min={1} max={5} value={leverage} onChange={(e) => setLeverage(parseInt(e.target.value))} className="w-full" />
-            <div className="flex justify-between text-[9px] text-[var(--text-dim)] font-mono mt-1"><span>1x</span><span>3x</span><span>5x</span></div>
+            <input type="range" min={1} max={20} value={leverage} onChange={(e) => setLeverage(parseInt(e.target.value))} className="w-full" />
+            <div className="flex justify-between text-[9px] text-[var(--text-dim)] font-mono mt-1"><span>1x</span><span>10x</span><span>20x</span></div>
           </div>
           <div className="flex items-end">
             <button onClick={runBacktest} disabled={running} className="btn-terminal btn-terminal-green w-full text-[12px] py-2.5 font-bold">
