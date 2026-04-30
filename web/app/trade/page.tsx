@@ -7,6 +7,13 @@ import { usePhoenixTx } from "@/lib/use-phoenix-tx";
 
 const SYMBOLS = ["SOL", "ETH", "BTC"];
 
+interface MarketLimit {
+  maxLeverage: number;
+  takerFee: number;
+  makerFee: number;
+  isolatedOnly: boolean;
+}
+
 function TradeContent() {
   const searchParams = useSearchParams();
   const defaultSymbol = searchParams.get("symbol") || "SOL";
@@ -16,14 +23,27 @@ function TradeContent() {
 
   const [symbol, setSymbol] = useState(defaultSymbol);
   const [side, setSide] = useState<"buy" | "sell">("buy");
-  const [size, setSize] = useState("");
-  const [leverage, setLeverage] = useState(2);
+  const [sizeUnits, setSizeUnits] = useState(0);
   const [stopLoss, setStopLoss] = useState("");
   const [takeProfit, setTakeProfit] = useState("");
   const [market, setMarket] = useState<Record<string, unknown> | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<string | null>(null);
-  const [walletBalance, setWalletBalance] = useState<number | null>(null);
+  const [walletBalance, setWalletBalance] = useState<number>(0);
+  const [marketLimits, setMarketLimits] = useState<Record<string, MarketLimit>>({});
+
+  const price = (market?.price as number) || 0;
+  const marketLimit = marketLimits[symbol];
+  const maxLeverage = marketLimit?.maxLeverage || 10;
+
+  // Max units = balance * maxLeverage / price
+  const maxUnits = price > 0 && walletBalance > 0
+    ? (walletBalance * maxLeverage) / price
+    : 0;
+
+  const notional = sizeUnits * price;
+  const effectiveLeverage = walletBalance > 0 ? notional / walletBalance : 0;
+  const marginUsed = walletBalance > 0 ? notional / maxLeverage : 0;
 
   useEffect(() => {
     const fetchMarket = async () => {
@@ -32,10 +52,10 @@ function TradeContent() {
         const data = await res.json();
         setMarket(data);
         if (data.price) {
-          const price = data.price as number;
-          const atr = price * 0.02;
-          setStopLoss(side === "buy" ? (price - atr * 1.5).toFixed(2) : (price + atr * 1.5).toFixed(2));
-          setTakeProfit(side === "buy" ? (price + atr * 3).toFixed(2) : (price - atr * 3).toFixed(2));
+          const p = data.price as number;
+          const atr = p * 0.02;
+          setStopLoss(side === "buy" ? (p - atr * 1.5).toFixed(2) : (p + atr * 1.5).toFixed(2));
+          setTakeProfit(side === "buy" ? (p + atr * 3).toFixed(2) : (p - atr * 3).toFixed(2));
         }
       } catch {}
     };
@@ -43,7 +63,18 @@ function TradeContent() {
   }, [symbol, side]);
 
   useEffect(() => {
-    if (!connected || !publicKey) { setWalletBalance(null); return; }
+    const fetchLimits = async () => {
+      try {
+        const res = await fetch("/api/markets");
+        const data = await res.json();
+        if (data.markets) setMarketLimits(data.markets);
+      } catch {}
+    };
+    fetchLimits();
+  }, []);
+
+  useEffect(() => {
+    if (!connected || !publicKey) { setWalletBalance(0); return; }
     const fetchBalance = async () => {
       try {
         const res = await fetch(`/api/wallet/balance?address=${publicKey.toBase58()}`);
@@ -52,15 +83,16 @@ function TradeContent() {
       } catch {}
     };
     fetchBalance();
+    const interval = setInterval(fetchBalance, 15000);
+    return () => clearInterval(interval);
   }, [connected, publicKey]);
 
-  const price = (market?.price as number) || 0;
-  const rsi = (market?.rsi as string) || "—";
-  const trend = (market?.trend as string) || "unknown";
-  const ema = (market?.ema as Record<string, number>) || {};
+  const handleMax = () => {
+    if (maxUnits > 0) setSizeUnits(maxUnits);
+  };
 
   const handleSubmit = async () => {
-    if (!size || !price) return;
+    if (!sizeUnits || !price) return;
     if (!connected) { setVisible(true); return; }
     setSubmitting(true);
     setResult(null);
@@ -69,10 +101,12 @@ function TradeContent() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          symbol, side, size: parseFloat(size), price,
+          symbol, side,
+          size: sizeUnits,
+          price,
           stopLoss: stopLoss ? parseFloat(stopLoss) : null,
           takeProfit: takeProfit ? parseFloat(takeProfit) : null,
-          leverage,
+          leverage: maxLeverage,
           wallet: publicKey?.toBase58(),
         }),
       });
@@ -81,20 +115,21 @@ function TradeContent() {
         setResult("[OK] Building transaction... Please sign in your wallet");
         const { signature, error } = await sendInstructions(data.instructions);
         if (signature) {
-          setResult(`[OK] ${side.toUpperCase()} ${size} ${symbol} @ $${price.toFixed(2)} — Tx: ${signature.slice(0, 8)}...`);
+          setResult(`[OK] ${side === "buy" ? "LONG" : "SHORT"} ${sizeUnits.toFixed(4)} ${symbol} @ $${price.toFixed(2)} — Tx: ${signature.slice(0, 8)}...`);
         } else {
           setResult(`[ERR] ${error || "Transaction failed"}`);
         }
       } else {
         setResult(`[ERR] ${data.error}`);
       }
-      if (data.success) setSize("");
+      if (data.success) setSizeUnits(0);
     } catch { setResult("[ERR] Trade execution failed"); }
     setSubmitting(false);
   };
 
-  const notional = size ? parseFloat(size) * price : 0;
-  const margin = leverage > 0 ? notional / leverage : 0;
+  const rsi = (market?.rsi as string) || "—";
+  const trend = (market?.trend as string) || "unknown";
+  const ema = (market?.ema as Record<string, number>) || {};
 
   return (
     <div className="max-w-5xl mx-auto space-y-6 animate-in">
@@ -113,9 +148,15 @@ function TradeContent() {
             <div>
               <label className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em] mb-2 block">Market</label>
               <div className="grid grid-cols-3 gap-1">
-                {SYMBOLS.map((s) => (
-                  <button key={s} onClick={() => setSymbol(s)} className={`py-2 text-[12px] font-mono font-medium transition-all border ${symbol === s ? "border-[var(--cyan)] text-[var(--cyan)] bg-[var(--cyan)]/10" : "border-[var(--border)] text-[var(--text-dim)] hover:border-[var(--text-secondary)] hover:text-[var(--text-secondary)]"}`}>{s}</button>
-                ))}
+                {SYMBOLS.map((s) => {
+                  const lev = marketLimits[s]?.maxLeverage || "?";
+                  return (
+                    <button key={s} onClick={() => { setSymbol(s); setSizeUnits(0); }} className={`py-2 text-[12px] font-mono font-medium transition-all border ${symbol === s ? "border-[var(--cyan)] text-[var(--cyan)] bg-[var(--cyan)]/10" : "border-[var(--border)] text-[var(--text-dim)] hover:border-[var(--text-secondary)] hover:text-[var(--text-secondary)]"}`}>
+                      {s}
+                      <span className="text-[9px] text-[var(--text-dim)] ml-0.5">({lev}x)</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -124,20 +165,39 @@ function TradeContent() {
               <button onClick={() => setSide("sell")} className={`py-2.5 text-[12px] font-mono font-bold transition-all border ${side === "sell" ? "border-[var(--red)] text-white bg-[var(--red)]" : "border-[var(--border)] text-[var(--text-dim)] hover:border-[var(--red)]/50"}`}>SHORT</button>
             </div>
 
+            {/* Order Size Slider — Phoenix style */}
             <div>
-              <label className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em] mb-2 block">Size ({symbol})</label>
-              <input type="number" value={size} onChange={(e) => setSize(e.target.value)} placeholder="0.00" className="terminal-input w-full" />
-              <div className="grid grid-cols-4 gap-1 mt-2">
-                {[0.1, 0.5, 1, 5].map((v) => (
-                  <button key={v} onClick={() => setSize(String(v))} className="py-1 text-[10px] border border-[var(--border)] hover:border-[var(--cyan)]/50 text-[var(--text-secondary)] font-mono transition-colors">{v}</button>
-                ))}
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em]">Order Size</label>
+                <div className="text-right">
+                  <div className="text-[16px] font-bold font-mono text-white">{sizeUnits.toFixed(4)}</div>
+                  <div className="text-[10px] text-[var(--text-dim)] font-mono">${notional.toFixed(2)}</div>
+                </div>
               </div>
-            </div>
-
-            <div>
-              <label className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em] mb-2 block">Leverage: {leverage}x</label>
-              <input type="range" min={1} max={20} value={leverage} onChange={(e) => setLeverage(parseInt(e.target.value))} className="w-full" />
-              <div className="flex justify-between text-[9px] text-[var(--text-dim)] font-mono mt-1"><span>1x</span><span>10x</span><span>20x</span></div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={0}
+                  max={maxUnits}
+                  step={maxUnits / 100}
+                  value={sizeUnits}
+                  onChange={(e) => setSizeUnits(parseFloat(e.target.value))}
+                  className="flex-1"
+                  disabled={maxUnits <= 0}
+                />
+                <button
+                  onClick={handleMax}
+                  disabled={maxUnits <= 0}
+                  className="px-3 py-1.5 text-[10px] font-mono border border-[var(--border)] hover:border-[var(--cyan)]/50 text-[var(--text-secondary)] transition-colors disabled:opacity-40"
+                >
+                  MAX
+                </button>
+              </div>
+              <div className="flex justify-between text-[9px] text-[var(--text-dim)] font-mono mt-1">
+                <span>0</span>
+                <span>{(maxUnits / 2).toFixed(2)}</span>
+                <span>{maxUnits.toFixed(2)} {symbol}</span>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-2">
@@ -152,10 +212,29 @@ function TradeContent() {
             </div>
 
             <div className="p-3 border border-[var(--border)] bg-black/20 space-y-1.5 text-[11px] font-mono">
-              <div className="flex justify-between"><span className="text-[var(--text-dim)]">Notional</span><span>${notional.toFixed(2)}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--text-dim)]">Margin</span><span>${margin.toFixed(2)}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--text-dim)]">Liq. Price</span><span className="text-[var(--orange)]">~${side === "buy" ? (price * (1 - 1/leverage * 0.9)).toFixed(2) : (price * (1 + 1/leverage * 0.9)).toFixed(2)}</span></div>
-              {walletBalance !== null && (
+              <div className="flex justify-between">
+                <span className="text-[var(--text-dim)]">Notional</span>
+                <span>${notional.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[var(--text-dim)]">Margin Used</span>
+                <span>${marginUsed.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[var(--text-dim)]">Effective Lev</span>
+                <span className={effectiveLeverage > maxLeverage * 0.9 ? "text-[var(--red)]" : "text-[var(--cyan)]"}>
+                  {effectiveLeverage.toFixed(1)}x / {maxLeverage}x max
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[var(--text-dim)]">Liq. Price (est)</span>
+                <span className="text-[var(--yellow)]">
+                  ~${side === "buy"
+                    ? (price * (1 - 1 / Math.max(effectiveLeverage, 1) * 0.9)).toFixed(2)
+                    : (price * (1 + 1 / Math.max(effectiveLeverage, 1) * 0.9)).toFixed(2)}
+                </span>
+              </div>
+              {walletBalance > 0 && (
                 <div className="flex justify-between border-t border-[var(--border)] pt-1.5 mt-1">
                   <span className="text-[var(--text-dim)]">Balance</span>
                   <span className="text-[var(--cyan)]">${walletBalance.toFixed(2)} USDC</span>
@@ -163,7 +242,11 @@ function TradeContent() {
               )}
             </div>
 
-            <button onClick={handleSubmit} disabled={submitting || !size || !price} className={`w-full py-3 text-[13px] font-mono font-bold transition-all disabled:opacity-40 border ${side === "buy" ? "border-[var(--green)] text-black bg-[var(--green)] hover:opacity-90" : "border-[var(--red)] text-white bg-[var(--red)] hover:opacity-90"}`}>
+            <button
+              onClick={handleSubmit}
+              disabled={submitting || sizeUnits <= 0 || !price}
+              className={`w-full py-3 text-[13px] font-mono font-bold transition-all disabled:opacity-40 border ${side === "buy" ? "border-[var(--green)] text-black bg-[var(--green)] hover:opacity-90" : "border-[var(--red)] text-white bg-[var(--red)] hover:opacity-90"}`}
+            >
               {!connected ? "[ CONNECT WALLET ]" : submitting ? "SIGNING..." : `${side === "buy" ? "LONG" : "SHORT"} ${symbol}`}
             </button>
 
@@ -183,7 +266,7 @@ function TradeContent() {
                 <span className="text-2xl font-bold text-[var(--cyan)]">{symbol}</span>
                 <div>
                   <div className="text-[11px] text-[var(--text-dim)]">PHOENIX-PERP</div>
-                  <div className="text-[10px] text-[var(--text-dim)]">1h candles · orderbook L2</div>
+                  <div className="text-[10px] text-[var(--text-dim)]">Max leverage: {maxLeverage}x · {marketLimit?.takerFee ? (marketLimit.takerFee * 10000).toFixed(1) : "3.5"} bps taker</div>
                 </div>
               </div>
               <div className="text-right">

@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { createPhoenixClient, Side, symbol as phoenixSymbol } from "@ellipsis-labs/rise";
 import { address } from "@solana/kit";
 import { defaultAuditor } from "@/lib/security";
-import { markSignalExecuted, readPendingSignals } from "@/lib/data-store";
 import { serializeInstruction } from "@/lib/phoenix-tx";
 
 export async function POST(request: Request) {
@@ -11,12 +10,6 @@ export async function POST(request: Request) {
 
   if (!signalId || !symbol || !side || !size || !price) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
-  }
-
-  const pending = readPendingSignals();
-  const sig = pending.find((s) => s.id === signalId);
-  if (!sig) {
-    return NextResponse.json({ error: "Signal not found or already processed" }, { status: 410 });
   }
 
   const clientIp = request.headers.get("x-forwarded-for") || "unknown";
@@ -40,28 +33,35 @@ export async function POST(request: Request) {
     await client.exchange.ready();
 
     const marketSymbol = phoenixSymbol(symbol);
+    const authority = address(wallet);
 
+    // Market order only — keep it simple
     const orderPacket = await client.orderPackets.buildMarketOrderPacket({
       symbol: marketSymbol,
       side: side === "buy" || side === "long" ? Side.Bid : Side.Ask,
       baseUnits: String(size),
     });
 
-    const ix = await client.ixs.buildPlaceMarketOrder({
-      authority: address(wallet),
+    const marketIx = await client.ixs.buildPlaceMarketOrder({
+      authority,
       symbol: marketSymbol,
       orderPacket,
     });
 
-    const serializedIx = serializeInstruction(ix as unknown as { programAddress: string; accounts: Array<{ address: string; role: number }>; data: Uint8Array });
+    const instructions = [serializeInstruction(marketIx as any)];
 
-    markSignalExecuted(signalId);
+    // Note: SL/TP conditional orders are NOT included in the same tx.
+    // Phoenix conditional orders (stop-loss / take-profit) require separate
+    // transactions and have complex trigger conditions. For now, execute
+    // the market order and manage exits manually or via the Positions page.
 
     return NextResponse.json({
       success: true,
-      instructions: [serializedIx],
+      instructions,
       signalId,
-      message: "Sign transaction in your wallet to submit",
+      stopLoss,
+      takeProfit,
+      message: `Sign transaction to submit market order (${side} ${size} ${symbol})`,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

@@ -19,114 +19,115 @@ interface TradeSignal {
 }
 
 interface BotConfig {
-  enabled: boolean;
   minConfidence: number;
-  maxPositionPct: number;
-  maxLeverage: number;
+  maxMarginPct: number;
   symbols: string[];
   interval: number;
-  portfolioValue: number;
-  walletAddress: string;
+}
+
+interface MarketLimit {
+  maxLeverage: number;
+  takerFee: number;
+  makerFee: number;
+  isolatedOnly: boolean;
 }
 
 const DEFAULT_CONFIG: BotConfig = {
-  enabled: false,
   minConfidence: 0.55,
-  maxPositionPct: 20,
-  maxLeverage: 20,
+  maxMarginPct: 20,
   symbols: ["SOL", "ETH", "BTC"],
   interval: 60,
-  portfolioValue: 0,
-  walletAddress: "",
 };
+
+const ALL_MARKETS = ["SOL", "ETH", "BTC", "XRP", "HYPE", "DOGE", "SUI", "NEAR", "AAVE", "ENA"];
+
+function loadLogs(): string[] {
+  try {
+    const raw = localStorage.getItem("bot-logs");
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return [];
+}
+
+function saveLogs(logs: string[]) {
+  try { localStorage.setItem("bot-logs", JSON.stringify(logs.slice(-30))); } catch {}
+}
 
 export default function BotsPage() {
   const { publicKey, connected } = useWallet();
   const { sendInstructions } = usePhoenixTx();
+
   const [config, setConfig] = useState<BotConfig>(DEFAULT_CONFIG);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [running, setRunning] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("bot-running") || "false"); } catch { return false; }
+  });
+
+  const [logs, setLogs] = useState<string[]>(loadLogs);
   const [signals, setSignals] = useState<TradeSignal[]>([]);
-  const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(true);
   const [autoExecute, setAutoExecute] = useState(false);
   const [executingId, setExecutingId] = useState<string | null>(null);
-  const logsEndRef = useRef<HTMLDivElement>(null);
-  const cycleTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [executeError, setExecuteError] = useState<string | null>(null);
+  const [marketLimits, setMarketLimits] = useState<Record<string, MarketLimit>>({});
+  const [portfolioValue, setPortfolioValue] = useState(0);
+
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const cycleTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const fetchStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/api/bot/status");
-      const data = await res.json();
-      setRunning(data.running || false);
-    } catch {}
+  // Persist running state
+  useEffect(() => {
+    try { localStorage.setItem("bot-running", JSON.stringify(running)); } catch {}
+  }, [running]);
+
+  // Persist logs (last 5 only)
+  useEffect(() => { saveLogs(logs); }, [logs]);
+
+  // Fetch config once on mount
+  useEffect(() => {
+    fetch("/api/bot/config")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data && typeof data === "object") {
+          const mapped: Partial<BotConfig> = {};
+          if (typeof data.minConfidence === "number") mapped.minConfidence = data.minConfidence;
+          if (typeof data.maxMarginPct === "number") mapped.maxMarginPct = data.maxMarginPct;
+          else if (typeof data.maxPositionPct === "number") mapped.maxMarginPct = data.maxPositionPct;
+          if (Array.isArray(data.symbols)) mapped.symbols = data.symbols;
+          if (typeof data.interval === "number") mapped.interval = data.interval;
+          setConfig((prev) => ({ ...prev, ...mapped }));
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
   }, []);
 
-  const fetchConfig = useCallback(async () => {
+  // Fetch market limits
+  const fetchMarketLimits = useCallback(async () => {
     try {
-      const res = await fetch("/api/bot/config");
+      const res = await fetch("/api/markets");
       const data = await res.json();
-      if (data && typeof data === "object") {
-        setConfig((prev) => ({ ...prev, ...data }));
-      }
+      if (data.markets) setMarketLimits(data.markets);
     } catch {}
   }, []);
-
-  const fetchLogs = useCallback(async () => {
-    try {
-      const res = await fetch("/api/bot/logs");
-      const data = await res.json();
-      if (data.logs) setLogs(data.logs);
-    } catch {}
-  }, []);
-
-  const fetchSignals = useCallback(async () => {
-    try {
-      const res = await fetch("/api/bot/signals");
-      const data = await res.json();
-      if (data.signals) setSignals(data.signals);
-    } catch {}
-  }, []);
-
-  const runCycle = useCallback(async () => {
-    try {
-      await fetch("/api/bot/cycle", { method: "POST" });
-      await fetchLogs();
-      await fetchSignals();
-      await fetchStatus();
-    } catch {}
-  }, [fetchLogs, fetchSignals, fetchStatus]);
 
   useEffect(() => {
-    Promise.all([fetchStatus(), fetchConfig()]).then(() => setLoading(false));
-  }, [fetchStatus, fetchConfig]);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      fetchLogs();
-      fetchSignals();
-      fetchStatus();
-    }, 3000);
+    fetchMarketLimits();
+    const interval = setInterval(fetchMarketLimits, 60000);
     return () => clearInterval(interval);
-  }, [fetchLogs, fetchSignals, fetchStatus]);
+  }, [fetchMarketLimits]);
 
-  // Re-fetch config when bot starts (so it picks up server-side config)
-  useEffect(() => {
-    if (running) fetchConfig();
-  }, [running, fetchConfig]);
-
-  // Auto-sync wallet address and balance into bot config
+  // Balance sync
   useEffect(() => {
     if (!connected || !publicKey) return;
-    const address = publicKey.toBase58();
-    setConfig((prev) => ({ ...prev, walletAddress: address }));
+    const addr = publicKey.toBase58();
 
     const fetchBalance = async () => {
       try {
-        const res = await fetch(`/api/wallet/balance?address=${address}`);
+        const res = await fetch(`/api/wallet/balance?address=${addr}`);
         const data = await res.json();
-        if (typeof data.usdc === "number" && data.usdc > 0) {
-          setConfig((prev) => ({ ...prev, portfolioValue: data.usdc }));
+        if (typeof data.usdc === "number") {
+          setPortfolioValue(data.usdc);
         }
       } catch {}
     };
@@ -135,11 +136,43 @@ export default function BotsPage() {
     return () => clearInterval(interval);
   }, [connected, publicKey]);
 
-  // Cycle runner: when bot is running, trigger a cycle every interval
+  // Run cycle — sends config in body so server doesn't need state
+  const runCycle = useCallback(async () => {
+    try {
+      const body = {
+        symbols: config.symbols,
+        minConfidence: config.minConfidence,
+        maxMarginPct: config.maxMarginPct,
+        walletAddress: publicKey?.toBase58() || "",
+        portfolioValue,
+      };
+      const res = await fetch("/api/bot/cycle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!data.ran) return;
+
+      // Append logs from this cycle
+      if (data.logs && Array.isArray(data.logs)) {
+        setLogs((prev) => [...prev, ...data.logs].slice(-50));
+      }
+
+      // Replace signals with fresh ones from this cycle
+      if (data.signals && Array.isArray(data.signals)) {
+        setSignals(data.signals.map((s: any) => ({ ...s, status: undefined })));
+      } else {
+        setSignals([]);
+      }
+    } catch {}
+  }, [config.symbols, config.minConfidence, config.maxMarginPct, publicKey, portfolioValue]);
+
+  // Cycle timer
   useEffect(() => {
     if (cycleTimerRef.current) clearInterval(cycleTimerRef.current);
     if (running) {
-      runCycle(); // run immediately
+      runCycle();
       cycleTimerRef.current = setInterval(runCycle, (config.interval || 60) * 1000);
     }
     return () => {
@@ -147,14 +180,14 @@ export default function BotsPage() {
     };
   }, [running, config.interval, runCycle]);
 
-  // Auto-scroll logs to bottom
+  // Auto-scroll logs
   useEffect(() => {
     if (logContainerRef.current) {
       logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
     }
   }, [logs]);
 
-  // Auto-execute signals
+  // Auto-execute
   useEffect(() => {
     if (!autoExecute || !connected || signals.length === 0) return;
     const exec = async () => {
@@ -167,18 +200,16 @@ export default function BotsPage() {
   }, [autoExecute, signals, connected, publicKey]);
 
   const toggleBot = async () => {
+    const nextRunning = !running;
+    setRunning(nextRunning);
     try {
-      const res = await fetch("/api/bot/toggle", {
+      await fetch("/api/bot/toggle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ config }),
       });
-      const data = await res.json();
-      setRunning(data.running);
     } catch {}
   };
-
-  const [executeError, setExecuteError] = useState<string | null>(null);
 
   const handleExecute = async (sig: TradeSignal) => {
     if (!connected || !publicKey) return;
@@ -208,7 +239,7 @@ export default function BotsPage() {
       if (data.success && data.instructions) {
         const { signature, error } = await sendInstructions(data.instructions);
         if (signature) {
-          console.log("Signal executed:", signature);
+          setSignals((prev) => prev.filter((s) => s.id !== sig.id));
         } else {
           setExecuteError(error || "Transaction failed");
         }
@@ -217,13 +248,26 @@ export default function BotsPage() {
       setExecuteError(err instanceof Error ? err.message : "Request failed");
     } finally {
       setExecutingId(null);
-      fetchSignals();
     }
   };
 
   const updateConfig = (patch: Partial<BotConfig>) => {
     setConfig((prev) => ({ ...prev, ...patch }));
+    setHasUnsavedChanges(true);
   };
+
+  const saveConfig = async () => {
+    try {
+      await fetch("/api/bot/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      setHasUnsavedChanges(false);
+    } catch {}
+  };
+
+  const clearLogs = () => setLogs([]);
 
   if (loading) return (
     <div className="flex items-center justify-center h-[80vh] text-[var(--text-dim)] font-mono">
@@ -281,7 +325,7 @@ export default function BotsPage() {
       <div className="terminal-card">
         <div className="terminal-header">
           <span className="text-[11px] font-bold tracking-wider">PENDING_SIGNALS</span>
-          <span className="text-[10px] text-[var(--text-dim)] ml-auto">{signals.length} waiting for execution</span>
+          <span className="text-[10px] text-[var(--text-dim)] ml-auto">{signals.length} from latest cycle</span>
         </div>
         <div className="p-4">
           {executeError && (
@@ -291,7 +335,7 @@ export default function BotsPage() {
           )}
           {signals.length === 0 ? (
             <div className="text-center py-6 text-[var(--text-dim)] text-[12px] font-mono">
-              {running ? "No pending signals. Bot is scanning markets..." : "Start the bot to generate signals."}
+              {running ? "No signals this cycle. Bot is scanning markets..." : "Start the bot to generate signals."}
             </div>
           ) : (
             <div className="space-y-2">
@@ -306,7 +350,7 @@ export default function BotsPage() {
                   </div>
                   <div className="flex items-center gap-4">
                     <div className="text-[10px] font-mono text-[var(--text-secondary)] text-right">
-                      <div>{sig.leverage}x · {(sig.size).toFixed(4)} units</div>
+                      <div>{sig.size.toFixed(4)} units · ${(sig.size * sig.entryPrice).toFixed(2)}</div>
                       <div>SL: {sig.stopLoss.toFixed(2)} | TP: {sig.takeProfit.toFixed(2)}</div>
                     </div>
                     <div className="text-[10px] font-mono text-right">
@@ -338,64 +382,68 @@ export default function BotsPage() {
             {/* Portfolio Value Display */}
             <div className="flex items-center justify-between py-2 px-3 bg-white/[0.02] border border-[var(--border)]">
               <span className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em]">Portfolio</span>
-              <span className="text-[13px] font-mono text-[var(--cyan)]">${config.portfolioValue.toFixed(2)}</span>
+              <span className="text-[13px] font-mono text-[var(--cyan)]">${portfolioValue.toFixed(2)}</span>
             </div>
 
             <div>
               <label className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em] mb-2 block">Markets</label>
-              <div className="flex gap-2">
-                {["SOL", "ETH", "BTC"].map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => {
-                      const next = config.symbols.includes(s)
-                        ? config.symbols.filter((x) => x !== s)
-                        : [...config.symbols, s];
-                      updateConfig({ symbols: next });
-                    }}
-                    className={`py-1.5 px-3 text-[11px] font-mono border transition-all ${config.symbols.includes(s) ? "border-[var(--cyan)] text-[var(--cyan)] bg-[var(--cyan)]/10" : "border-[var(--border)] text-[var(--text-dim)]"}`}
-                  >
-                    {s}
-                  </button>
-                ))}
+              <div className="flex gap-2 flex-wrap">
+                {ALL_MARKETS.map((s) => {
+                  const limit = marketLimits[s];
+                  const maxLev = limit?.maxLeverage || "?";
+                  return (
+                    <button
+                      key={s}
+                      onClick={() => {
+                        const next = config.symbols.includes(s)
+                          ? config.symbols.filter((x) => x !== s)
+                          : [...config.symbols, s];
+                        updateConfig({ symbols: next });
+                      }}
+                      className={`py-1.5 px-3 text-[11px] font-mono border transition-all ${config.symbols.includes(s) ? "border-[var(--cyan)] text-[var(--cyan)] bg-[var(--cyan)]/10" : "border-[var(--border)] text-[var(--text-dim)]"}`}
+                    >
+                      {s}
+                      <span className="text-[9px] text-[var(--text-dim)] ml-1">({maxLev}x)</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
             <div>
               <div className="flex items-center gap-2 mb-2">
                 <label className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em]">Min Confidence: {(config.minConfidence * 100).toFixed(0)}%</label>
-                <span className="text-[9px] text-[var(--text-dim)]" title="Minimum signal strength required before the bot queues a trade. Higher = fewer but stronger signals.">(?)</span>
+                <span className="text-[9px] text-[var(--text-dim)] cursor-help" title="Minimum signal strength required before the bot queues a trade. Higher = fewer but stronger signals.">(?)</span>
               </div>
               <input type="range" min={30} max={90} value={config.minConfidence * 100} onChange={(e) => updateConfig({ minConfidence: parseInt(e.target.value) / 100 })} className="w-full" />
             </div>
 
             <div>
               <div className="flex items-center gap-2 mb-2">
-                <label className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em]">Max Position: {config.maxPositionPct}%</label>
-                <span className="text-[9px] text-[var(--text-dim)]" title="Percentage of your portfolio to use as margin per trade. 100% = use entire balance. Example: $100 balance × 20% = $20 margin per trade.">(?)</span>
+                <label className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em]">Max Margin: {config.maxMarginPct}%</label>
+                <span className="text-[9px] text-[var(--text-dim)] cursor-help" title="Percentage of your portfolio to use as margin per trade. 20% of $100 = $20 margin. Position size = margin × market max leverage.">(?)</span>
               </div>
-              <input type="range" min={1} max={100} value={config.maxPositionPct} onChange={(e) => updateConfig({ maxPositionPct: parseInt(e.target.value) })} className="w-full" />
-            </div>
-
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <label className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em]">Max Leverage: {config.maxLeverage}x</label>
-                <span className="text-[9px] text-[var(--text-dim)]" title="Leverage multiplier applied to each trade. 20x means $20 notional exposure for every $1 of margin.">(?)</span>
+              <input type="range" min={5} max={100} value={config.maxMarginPct} onChange={(e) => updateConfig({ maxMarginPct: parseInt(e.target.value) })} className="w-full" />
+              <div className="flex justify-between text-[9px] text-[var(--text-dim)] font-mono mt-1">
+                <span>5%</span>
+                <span>50%</span>
+                <span>100%</span>
               </div>
-              <input type="range" min={1} max={20} value={config.maxLeverage} onChange={(e) => updateConfig({ maxLeverage: parseInt(e.target.value) })} className="w-full" />
-              <div className="flex justify-between text-[9px] text-[var(--text-dim)] font-mono mt-1"><span>1x</span><span>10x</span><span>20x</span></div>
             </div>
 
             <div>
               <div className="flex items-center gap-2 mb-2">
                 <label className="text-[10px] text-[var(--text-dim)] uppercase tracking-[0.15em]">Scan Interval: {config.interval}s</label>
-                <span className="text-[9px] text-[var(--text-dim)]" title="How often the bot analyzes markets and generates signals.">(?)</span>
+                <span className="text-[9px] text-[var(--text-dim)] cursor-help" title="How often the bot analyzes markets and generates signals.">(?)</span>
               </div>
               <input type="range" min={10} max={300} step={10} value={config.interval} onChange={(e) => updateConfig({ interval: parseInt(e.target.value) })} className="w-full" />
             </div>
 
-            <button onClick={async () => { await fetch("/api/bot/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(config) }); }} className="btn-terminal w-full text-[11px]">
-              [ SAVE CONFIG ]
+            <button
+              onClick={saveConfig}
+              className={`btn-terminal w-full text-[11px] ${hasUnsavedChanges ? "border-[var(--yellow)] text-[var(--yellow)]" : ""}`}
+            >
+              [ SAVE CONFIG {hasUnsavedChanges ? "*" : ""} ]
             </button>
           </div>
         </div>
@@ -406,7 +454,7 @@ export default function BotsPage() {
             <span className="text-[11px] font-bold tracking-wider">BOT_LOG</span>
             <div className="flex items-center gap-3 ml-auto">
               <span className="text-[10px] text-[var(--text-dim)]">{logs.length} entries</span>
-              <button onClick={() => logsEndRef.current?.scrollIntoView({ behavior: "smooth" })} className="text-[10px] text-[var(--cyan)] hover:underline">[ scroll to end ]</button>
+              <button onClick={clearLogs} className="text-[10px] text-[var(--red)] hover:underline">[ clear ]</button>
             </div>
           </div>
           <div ref={logContainerRef} className="flex-1 overflow-y-auto p-4 font-mono text-[11px] space-y-1 bg-black/30">
@@ -415,14 +463,13 @@ export default function BotsPage() {
             ) : (
               logs.map((line, i) => {
                 const isError = line.includes("ERR") || line.includes("error") || line.includes("failed");
-                const isSuccess = line.includes("OK") || line.includes("success") || line.includes("SIGNAL QUEUED");
-                const isWarn = line.includes("WARN");
+                const isSuccess = line.includes("OK") || line.includes("success") || line.includes("SIGNAL");
+                const isWarn = line.includes("WARN") || line.includes("⚠") || line.includes("⏸");
                 return (
                   <div key={i} className={`log-entry ${isError ? "log-error" : isSuccess ? "log-success" : isWarn ? "log-warn" : "log-info"}`}>{line}</div>
                 );
               })
             )}
-            <div ref={logsEndRef} />
           </div>
         </div>
       </div>

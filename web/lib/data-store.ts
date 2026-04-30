@@ -128,81 +128,27 @@ export function writeBotState(state: any) {
 
 // Bot config
 export function readBotConfig() {
-  return readJson("bot-config.json", {
+  const saved = readJson("bot-config.json", null);
+  if (saved) {
+    // Migrate old field names
+    if (saved.maxPositionPct !== undefined && saved.maxMarginPct === undefined) {
+      saved.maxMarginPct = saved.maxPositionPct;
+    }
+    return saved;
+  }
+  return {
     enabled: false,
     minConfidence: 0.55,
-    maxPositionPct: 20,
-    maxLeverage: 20,
+    maxMarginPct: 20,
     symbols: ["SOL", "ETH", "BTC"],
     interval: 60,
     portfolioValue: 1000,
     walletAddress: "",
-  });
+  };
 }
 
 export function writeBotConfig(config: any) {
   writeJson("bot-config.json", config);
-}
-
-// Signal queue
-export interface TradeSignal {
-  id: string;
-  cycle: number;
-  symbol: string;
-  side: string;
-  entryPrice: number;
-  size: number;
-  leverage: number;
-  stopLoss: number;
-  takeProfit: number;
-  confidence: number;
-  longVotes: number;
-  shortVotes: number;
-  details: Array<{ name: string; signal: string; confidence: string }>;
-  queuedAt: number;
-  status: "pending" | "executed" | "expired" | "rejected";
-  executedAt?: number;
-  txSignature?: string;
-}
-
-export function readPendingSignals(): TradeSignal[] {
-  return readLines("signal-queue.jsonl", (s: TradeSignal) => s.status === "pending");
-}
-
-export function readAllSignals(): TradeSignal[] {
-  return readLines("signal-queue.jsonl");
-}
-
-export function pushSignal(signal: Omit<TradeSignal, "queuedAt" | "status">) {
-  appendLine("signal-queue.jsonl", { ...signal, queuedAt: Date.now(), status: "pending" });
-}
-
-export function markSignalExecuted(signalId: string, txSignature?: string) {
-  updateLines("signal-queue.jsonl", (s: TradeSignal) => {
-    if (s.id === signalId) {
-      return { ...s, status: "executed", executedAt: Date.now(), txSignature: txSignature || s.txSignature };
-    }
-    return s;
-  });
-}
-
-export function rejectSignal(signalId: string) {
-  updateLines("signal-queue.jsonl", (s: TradeSignal) => {
-    if (s.id === signalId) {
-      return { ...s, status: "rejected", rejectedAt: Date.now() };
-    }
-    return s;
-  });
-}
-
-export function expireOldSignals(maxAgeMs = 300000) {
-  const now = Date.now();
-  updateLines("signal-queue.jsonl", (s: TradeSignal) => {
-    if (s.status === "pending" && now - s.queuedAt > maxAgeMs) {
-      return { ...s, status: "expired", expiredAt: now };
-    }
-    return s;
-  });
 }
 
 // Bot logs

@@ -74,6 +74,45 @@ export async function getExchangeInfo() {
   return c.api.exchange().getExchange();
 }
 
+// ─── Market Limits ─────────────────────────────────────────
+
+let marketCache = null;
+let marketCacheTime = 0;
+
+export async function getMarketMaxLeverage(symbol) {
+  const now = Date.now();
+  if (!marketCache || now - marketCacheTime > 60000) {
+    const c = getClient();
+    marketCache = await c.api.markets().getMarkets();
+    marketCacheTime = now;
+  }
+  const market = (marketCache || []).find((m) => m.symbol === symbol);
+  if (!market || !market.leverageTiers || market.leverageTiers.length === 0) return 10;
+  return market.leverageTiers[0].maxLeverage || 10;
+}
+
+export async function getAllMarketLimits() {
+  const now = Date.now();
+  if (!marketCache || now - marketCacheTime > 60000) {
+    const c = getClient();
+    marketCache = await c.api.markets().getMarkets();
+    marketCacheTime = now;
+  }
+  const limits = {};
+  for (const m of marketCache || []) {
+    if (m.symbol && m.leverageTiers && m.leverageTiers.length > 0) {
+      limits[m.symbol] = {
+        maxLeverage: m.leverageTiers[0].maxLeverage || 10,
+        tickSize: m.tickSize,
+        takerFee: m.takerFee,
+        makerFee: m.makerFee,
+        isolatedOnly: m.isolatedOnly || false,
+      };
+    }
+  }
+  return limits;
+}
+
 // ─── Price Helpers ─────────────────────────────────────────
 
 export async function getCurrentPrice(symbol) {

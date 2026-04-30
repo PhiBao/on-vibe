@@ -1,41 +1,127 @@
 import { NextResponse } from "next/server";
-import { readBotState, writeBotState, readBotConfig, pushSignal, logLine, readPendingSignals } from "@/lib/data-store";
+import { createPhoenixClient } from "@ellipsis-labs/rise";
 
-export async function POST() {
-  const state = readBotState();
-  if (!state.running) {
-    return NextResponse.json({ ran: false, reason: "bot_stopped" });
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => ({}));
+  const symbols: string[] = body.symbols || ["SOL", "ETH", "BTC"];
+  const minConfidence = body.minConfidence || 0.55;
+  const maxMarginPct = body.maxMarginPct || 20;
+  const walletAddress = body.walletAddress || "";
+  const portfolioValueFromClient = body.portfolioValue || 0;
+
+  const logs: string[] = [];
+  function log(line: string) {
+    logs.push(line);
   }
 
-  const config = readBotConfig();
-  const symbols: string[] = config.symbols || ["SOL", "ETH", "BTC"];
-  const minConfidence = config.minConfidence || 0.55;
+  log(`🔄 Cycle start`);
 
-  const cycle = (state.cycle || 0) + 1;
-  writeBotState({ ...state, cycle });
-  logLine(`🔄 Cycle #${cycle}`);
+  // Fetch real balance + positions if wallet connected
+  let portfolioValue = portfolioValueFromClient || 1000;
+  const onChainPositions: Array<{ symbol: string; side: string }> = [];
+
+  if (walletAddress) {
+    try {
+      const client = createPhoenixClient({
+        apiUrl: "https://perp-api.phoenix.trade",
+        rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://api.mainnet-beta.solana.com",
+      });
+      await client.exchange.ready();
+
+      const traderState = await client.api.traders().getTraderStateSnapshot(walletAddress);
+
+      // Raw debug dump — log the top-level keys so we know the structure
+      log(`  [debug] traderState keys: ${Object.keys(traderState as any).join(", ")}`);
+      const tsAny = traderState as any;
+      if (tsAny.snapshot) {
+        log(`  [debug] snapshot keys: ${Object.keys(tsAny.snapshot).join(", ")}`);
+      }
+
+      // Try multiple response structures
+      let subaccounts: any[] = [];
+      if (tsAny?.snapshot?.subaccounts && Array.isArray(tsAny.snapshot.subaccounts)) {
+        subaccounts = tsAny.snapshot.subaccounts;
+        log(`  [debug] using snapshot.subaccounts (${subaccounts.length})`);
+      } else if (tsAny?.subaccounts && Array.isArray(tsAny.subaccounts)) {
+        subaccounts = tsAny.subaccounts;
+        log(`  [debug] using root subaccounts (${subaccounts.length})`);
+      } else if (tsAny?.traderSubaccounts && Array.isArray(tsAny.traderSubaccounts)) {
+        subaccounts = tsAny.traderSubaccounts;
+        log(`  [debug] using traderSubaccounts (${subaccounts.length})`);
+      } else {
+        log(`  [debug] no subaccounts array found — dumping raw state`);
+        try {
+          const rawStr = JSON.stringify(tsAny).slice(0, 500);
+          log(`  [debug] raw: ${rawStr}...`);
+        } catch {}
+      }
+
+      let usdc = 0;
+      for (const sub of subaccounts) {
+        try {
+          const c = sub.collateral ?? sub.deposits ?? "0";
+          const collateralRaw = typeof c === "bigint" ? Number(c) : parseFloat(String(c));
+          usdc += collateralRaw / 1e6;
+        } catch {}
+
+        // Log subaccount keys to find where positions live
+        log(`  [debug] subaccount keys: ${Object.keys(sub).join(", ")}`);
+
+        const posArray = sub.positions ?? sub.openPositions ?? [];
+        log(`  [debug] positions count: ${posArray.length}`);
+
+        for (const p of posArray) {
+          if (!p) continue;
+          // Log raw position object keys
+          log(`  [debug] position keys: ${Object.keys(p).join(", ")}`);
+
+          const symRaw = p.symbol ?? "";
+          const sym = typeof symRaw === "string" ? symRaw : String(symRaw);
+
+          // Phoenix snapshot uses basePositionLots (raw) or basePositionUnits (human-readable)
+          let size = 0;
+          try {
+            if (p.basePositionUnits) {
+              size = parseFloat(String(p.basePositionUnits));
+            } else if (p.basePositionLots) {
+              size = parseFloat(String(p.basePositionLots));
+            }
+          } catch {}
+
+          // Side is determined by sign — no explicit side field in snapshot
+          const side = size > 0 ? "long" : size < 0 ? "short" : "";
+          log(`  [debug] pos parsed: sym=${sym} side=${side} size=${size}`);
+          if (sym && size !== 0) {
+            onChainPositions.push({ symbol: sym, side });
+          }
+        }
+      }
+      if (usdc > 0) portfolioValue = usdc;
+      log(`  Wallet: $${portfolioValue.toFixed(2)} | ${onChainPositions.length} on-chain positions`);
+    } catch (err: unknown) {
+      log(`  ⚠ Balance fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } else {
+    log(`  ⚠ No wallet address provided — cannot check on-chain positions`);
+  }
 
   // Import engine modules dynamically
-  const { initPhoenix, getCandles, getCurrentPrice, getFundingRate } = await import("@/lib/engine/market.js");
+  const { initPhoenix, getCandles, getCurrentPrice, getFundingRate, getAllMarketLimits } = await import("@/lib/engine/market.js");
   const { TrendFollowing, MeanReversion, Momentum, SRBounce, VolumeBreakout, synthesizeSignals } = await import("@/lib/engine/signals.js");
   const { analyzeFunding } = await import("@/lib/engine/funding.js");
-  const { RiskManager } = await import("@/lib/engine/risk.js");
 
   let phoenix = null;
   try {
     phoenix = await initPhoenix();
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logLine(`⚠ Phoenix init failed: ${msg}`);
+    log(`⚠ Phoenix init failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  const portfolioValue = config.portfolioValue || 1000;
-  const risk = new RiskManager({
-    maxPositionPct: config.maxPositionPct || 20,
-    maxDailyLossPct: 10,
-    maxLeverage: config.maxLeverage || 20,
-    portfolioValue,
-  });
+  // Fetch dynamic market limits
+  let marketLimits: Record<string, any> = {};
+  try {
+    marketLimits = await getAllMarketLimits();
+  } catch {}
 
   const signalsGenerated: Array<Record<string, unknown>> = [];
 
@@ -43,7 +129,7 @@ export async function POST() {
     try {
       const candles = await getCandles(symbol, "1h", 100);
       if (!candles || candles.length < 50) {
-        logLine(`  ${symbol}: insufficient data (${candles?.length || 0})`);
+        log(`  ${symbol}: insufficient data (${candles?.length || 0})`);
         continue;
       }
 
@@ -66,70 +152,63 @@ export async function POST() {
         }
       } catch {}
 
-      const combined = synthesizeSignals(strategies, price, { maxLeverage: config.maxLeverage || 20 });
+      // Use market-specific max leverage from Phoenix
+      const marketMaxLev = marketLimits[symbol]?.maxLeverage || 10;
+      const margin = portfolioValue * (maxMarginPct / 100);
+      const notional = margin * marketMaxLev;
+      const positionSize = notional / price;
+
+      const combined = synthesizeSignals(strategies, price, { maxLeverage: marketMaxLev });
       if (fundingSignal.signal !== 0) {
         combined.signal = combined.signal * 0.8 + fundingSignal.signal * 0.2;
         combined.confidence = Math.min(1, combined.confidence + fundingSignal.confidence * 0.1);
       }
 
       const stratLog = strategies.map((s: {name: string; signal: number}) => `${s.name.slice(0,6)}:${s.signal > 0 ? "▲" : s.signal < 0 ? "▼" : "◆"}${s.signal.toFixed(1)}`).join(" ");
-      logLine(`  ${symbol}: $${price.toFixed(2)} ${combined.signal > 0 ? "▲" : combined.signal < 0 ? "▼" : "◆"} sig:${combined.signal.toFixed(2)} conf:${(combined.confidence * 100).toFixed(1)}% | ${stratLog}`);
+      log(`  ${symbol}: $${price.toFixed(2)} ${combined.signal > 0 ? "▲" : combined.signal < 0 ? "▼" : "◆"} sig:${combined.signal.toFixed(2)} conf:${(combined.confidence * 100).toFixed(1)}% maxLev:${marketMaxLev}x | ${stratLog}`);
 
       if (combined.action === "hold" || combined.confidence < minConfidence) {
-        if (combined.action !== "hold") logLine(`    ⏸ Below threshold (${(combined.confidence * 100).toFixed(1)}% < ${(minConfidence * 100).toFixed(1)}%)`);
+        if (combined.action !== "hold") log(`    ⏸ Below threshold (${(combined.confidence * 100).toFixed(1)}% < ${(minConfidence * 100).toFixed(1)}%)`);
         continue;
       }
 
-      const existing = risk.openPositions.find((p: any) => p.symbol === symbol);
-      if (existing) {
-        logLine(`    ⏸ Already have position on ${symbol}`);
+      // Check real on-chain positions — don't duplicate
+      const hasPosition = onChainPositions.find((p) => p.symbol === symbol);
+      if (hasPosition) {
+        log(`    ⏸ Already have ${hasPosition.side} position on ${symbol} (on-chain)`);
         continue;
       }
 
-      const validation = risk.canTrade(combined);
-      if (!validation.allowed) {
-        logLine(`    ⛔ ${validation.reasons.join(", ")}`);
-        continue;
-      }
-
-      combined.leverage = validation.leverage;
-      const pending = readPendingSignals();
-      const dup = pending.find((s) => s.symbol === symbol && s.side === combined.action);
-      if (!dup) {
-        const signal = {
-          id: `sig_${Date.now()}_${symbol}`,
-          cycle,
-          symbol,
-          side: combined.action,
-          entryPrice: price,
-          size: validation.positionSize,
-          leverage: combined.leverage,
-          stopLoss: combined.stopLoss,
-          takeProfit: combined.takeProfit,
-          confidence: combined.confidence,
-          longVotes: combined.longVotes,
-          shortVotes: combined.shortVotes,
-          details: combined.details,
-        };
-        pushSignal(signal);
-        signalsGenerated.push(signal);
-        logLine(`    🔔 SIGNAL QUEUED: ${combined.action.toUpperCase()} ${symbol} | $${price.toFixed(2)} | ${combined.leverage}x`);
-      } else {
-        logLine(`    ⏸ Signal already pending for ${symbol}`);
-      }
+      const signal = {
+        id: `sig_${Date.now()}_${symbol}`,
+        symbol,
+        side: combined.action,
+        entryPrice: price,
+        size: positionSize,
+        leverage: marketMaxLev,
+        stopLoss: combined.stopLoss,
+        takeProfit: combined.takeProfit,
+        confidence: combined.confidence,
+        longVotes: combined.longVotes,
+        shortVotes: combined.shortVotes,
+        details: combined.details,
+        queuedAt: Date.now(),
+      };
+      signalsGenerated.push(signal);
+      log(`    🔔 SIGNAL: ${combined.action.toUpperCase()} ${symbol} | $${price.toFixed(2)} | ${positionSize.toFixed(4)} units | SL:${combined.stopLoss?.toFixed(2)} | TP:${combined.takeProfit?.toFixed(2)}`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      logLine(`  ${symbol}: Error — ${msg}`);
+      log(`  ${symbol}: Error — ${msg}`);
     }
   }
 
-  const stats = risk.getStats();
-  logLine(`📊 $${stats.portfolioValue.toFixed(2)} | PnL: $${stats.totalPnl.toFixed(2)} | Win: ${stats.winRate} | DD: ${stats.currentDrawdown} | Pos: ${stats.openPositions} | Pending: ${readPendingSignals().length}`);
+  log(`📊 Portfolio: $${portfolioValue.toFixed(2)} | Signals: ${signalsGenerated.length} | Positions: ${onChainPositions.length}`);
 
   return NextResponse.json({
     ran: true,
-    cycle,
-    signalsGenerated: signalsGenerated.length,
+    logs,
     signals: signalsGenerated,
+    portfolioValue,
+    onChainPositions,
   });
 }

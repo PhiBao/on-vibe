@@ -20,46 +20,125 @@ export async function GET(request: Request) {
     });
     await client.exchange.ready();
 
+    // Fetch market metadata (best effort — don't let this kill the whole request)
+    let marketMeta: Record<string, { baseLotsDecimals: number; tickSize: number }> = {};
+    try {
+      const markets = await client.api.markets().getMarkets();
+      for (const m of markets || []) {
+        if (m.symbol) {
+          marketMeta[m.symbol] = {
+            baseLotsDecimals: typeof m.baseLotsDecimals === "number" ? m.baseLotsDecimals : 0,
+            tickSize: typeof m.tickSize === "number" ? m.tickSize : 1,
+          };
+        }
+      }
+    } catch (metaErr: any) {
+      console.warn("[BALANCE] Market metadata fetch failed:", metaErr.message || metaErr);
+    }
+
     const traderState = await client.api.traders().getTraderStateSnapshot(address);
 
-    // The response structure: { authority, traderPdaIndex, slot, snapshot: { subaccounts: [...] } }
-    const ts = traderState as unknown as {
-      snapshot?: {
-        subaccounts?: Array<{
-          collateral: string;
-          positions: Array<{
-            marketSymbol?: string;
-            symbol?: string;
-            side?: string;
-            baseLots?: number;
-            size?: number;
-            entryPrice?: number;
-            unrealizedPnl?: number;
-            quoteLots?: number;
-          }>;
-        }>;
-      };
-    };
+    // Phoenix can return trader state in multiple shapes — try them all
+    // Shape 1: { snapshot: { subaccounts: [...] } }
+    // Shape 2: { subaccounts: [...] }
+    // Shape 3: { authority, slot, subaccounts: [...] }
+    let subaccounts: any[] = [];
+
+    const tsAny = traderState as any;
+    if (tsAny?.snapshot?.subaccounts && Array.isArray(tsAny.snapshot.subaccounts)) {
+      subaccounts = tsAny.snapshot.subaccounts;
+    } else if (tsAny?.subaccounts && Array.isArray(tsAny.subaccounts)) {
+      subaccounts = tsAny.subaccounts;
+    } else if (tsAny?.traderSubaccounts && Array.isArray(tsAny.traderSubaccounts)) {
+      subaccounts = tsAny.traderSubaccounts;
+    }
+
+    // If still no subaccounts, try to find any array that looks like positions
+    if (subaccounts.length === 0 && tsAny) {
+      for (const key of Object.keys(tsAny)) {
+        const val = tsAny[key];
+        if (Array.isArray(val) && val.length > 0 && typeof val[0] === "object") {
+          // Check if this array looks like subaccounts (has collateral or positions)
+          if (val[0].collateral !== undefined || val[0].positions !== undefined) {
+            subaccounts = val;
+            break;
+          }
+        }
+      }
+    }
 
     let usdc = 0;
     const positions: Array<Record<string, unknown>> = [];
 
-    const subaccounts = ts?.snapshot?.subaccounts || [];
     for (const sub of subaccounts) {
-      // collateral is a string representing raw USDC amount (6 decimals)
-      const collateralRaw = parseFloat(sub.collateral || "0");
+      // collateral can be string, number, or bigint
+      let collateralRaw = 0;
+      try {
+        const c = sub.collateral ?? sub.deposits ?? "0";
+        collateralRaw = typeof c === "bigint" ? Number(c) : parseFloat(String(c));
+      } catch {}
       usdc += collateralRaw / 1e6;
 
-      for (const p of sub.positions || []) {
+      const posArray = sub.positions ?? sub.openPositions ?? [];
+      for (const p of posArray) {
+        if (!p) continue;
+        // Phoenix snapshot: symbol is direct string, no marketSymbol wrapper
+        const symRaw = p.symbol ?? "";
+        const sym = typeof symRaw === "string" ? symRaw : String(symRaw);
+        if (!sym) continue;
+
+        // Phoenix uses basePositionLots (raw) or basePositionUnits (human-readable)
+        let size = 0;
+        try {
+          if (p.basePositionUnits) {
+            size = parseFloat(String(p.basePositionUnits));
+          } else if (p.basePositionLots) {
+            const meta = marketMeta[sym] || { baseLotsDecimals: 0, tickSize: 1 };
+            const lots = parseFloat(String(p.basePositionLots));
+            size = lots / Math.pow(10, meta.baseLotsDecimals);
+          }
+        } catch {}
+
+        // Skip zero positions
+        if (size === 0) continue;
+
+        // Side derived from sign (no explicit side field in snapshot)
+        const side = size > 0 ? "long" : "short";
+        const absSize = Math.abs(size);
+
+        // Entry price: prefer entryPriceUsd string, else derive
+        let entryPrice = 0;
+        try {
+          if (p.entryPriceUsd) {
+            entryPrice = parseFloat(String(p.entryPriceUsd));
+          } else if (p.entryPrice) {
+            entryPrice = parseFloat(String(p.entryPrice));
+          }
+        } catch {}
+
+        let unrealizedPnl = 0;
+        try {
+          const u = p.unrealizedPnl ?? p.upnl ?? 0;
+          unrealizedPnl = typeof u === "number" ? u : parseFloat(String(u));
+        } catch {}
+
         positions.push({
-          symbol: p.marketSymbol || p.symbol || "?",
-          side: p.side || "?",
-          size: p.baseLots || p.size || 0,
-          entryPrice: p.entryPrice || 0,
-          unrealizedPnl: p.unrealizedPnl || 0,
-          quoteLots: p.quoteLots || 0,
+          symbol: sym,
+          side,
+          size: absSize,
+          entryPrice,
+          unrealizedPnl,
+          rawBasePositionLots: p.basePositionLots ?? null,
         });
       }
+    }
+
+    // If no positions found, dump raw trader state for debugging
+    if (positions.length === 0 && subaccounts.length === 0) {
+      try {
+        const rawKeys = Object.keys(tsAny);
+        console.warn("[BALANCE] No positions found. Top-level keys:", rawKeys);
+      } catch {}
     }
 
     return NextResponse.json({
@@ -70,6 +149,7 @@ export async function GET(request: Request) {
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
+    console.error("[WALLET BALANCE ERROR]", message);
     return NextResponse.json({ address, usdc: 0, positions: [], error: message });
   }
 }
