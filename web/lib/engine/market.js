@@ -1,19 +1,25 @@
-import { createPhoenixClient, Side, Direction } from "@ellipsis-labs/rise";
+import {
+  createPhoenixClient,
+  Side,
+  Direction,
+  StopLossOrderKind,
+  symbol as phoenixSymbol,
+  ticks,
+  baseLots,
+} from "@ellipsis-labs/rise";
 
 let client = null;
 
 export async function initPhoenix() {
   if (client) return client;
-  
+
   client = createPhoenixClient({
     apiUrl: "https://perp-api.phoenix.trade",
     rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://api.mainnet-beta.solana.com",
     exchangeMetadata: { stream: false },
   });
 
-  // Wait for exchange metadata to load
   await client.exchange.ready();
-  console.log("✓ Phoenix client initialized");
   return client;
 }
 
@@ -37,8 +43,7 @@ export async function getMarket(symbol) {
 export async function getCandles(symbol, interval = "1h", limit = 100) {
   const c = getClient();
   const raw = await c.api.candles().getCandles(symbol, { timeframe: interval });
-  // Normalize: Phoenix returns array of candle objects
-  return (raw || []).slice(-limit).map(candle => ({
+  return (raw || []).slice(-limit).map((candle) => ({
     timestamp: candle.time || candle.timestamp || candle.t,
     open: parseFloat(candle.open || candle.o),
     high: parseFloat(candle.high || candle.h),
@@ -133,6 +138,28 @@ export async function getMidPrice(symbol) {
   return (bestBid + bestAsk) / 2;
 }
 
+// ─── Tick / BaseLots Conversion ────────────────────────────
+
+function getMarketUnits(symbol) {
+  const c = getClient();
+  const market = c.exchange.market(symbol);
+  if (!market) throw new Error(`Market ${symbol} not found in exchange cache`);
+  return {
+    tickSize: market.tickSize,
+    baseLotsDecimals: market.baseLotsDecimals,
+  };
+}
+
+function usdToTicks(priceUsd, tickSize, baseLotsDecimals) {
+  const priceMicros = BigInt(Math.round(priceUsd * 1_000_000));
+  const denominator = BigInt(tickSize) * BigInt(Math.pow(10, baseLotsDecimals));
+  return priceMicros / denominator;
+}
+
+function sizeToBaseLots(sizeUnits, baseLotsDecimals) {
+  return baseLots(BigInt(Math.round(sizeUnits * Math.pow(10, baseLotsDecimals))));
+}
+
 // ─── Order Building ────────────────────────────────────────
 
 export async function buildLimitOrder(symbol, side, priceUsd, baseUnits) {
@@ -156,12 +183,82 @@ export async function buildMarketOrder(symbol, side, baseUnits) {
 
 export async function buildStopLoss(symbol, side, triggerPrice) {
   const c = getClient();
+  const { tickSize, baseLotsDecimals } = getMarketUnits(symbol);
   return c.ixs.buildPlaceStopLoss({
-    symbol,
+    symbol: phoenixSymbol(symbol),
     tradeSide: side === "buy" ? Side.Bid : Side.Ask,
     executionDirection: side === "buy" ? Direction.LessThan : Direction.GreaterThan,
-    triggerPrice: BigInt(Math.round(triggerPrice * 1e6)),
+    triggerPrice: ticks(usdToTicks(triggerPrice, tickSize, baseLotsDecimals)),
+    orderKind: StopLossOrderKind.Limit,
   });
 }
 
-export { Side, Direction };
+/**
+ * Build a single conditional order (SL or TP) using the legacy stop-loss API.
+ * This matches what Phoenix web app sends for each direction separately.
+ */
+export async function buildStopLossOrder(symbol, authority, side, triggerPrice, isTakeProfit) {
+  const c = getClient();
+  const { tickSize, baseLotsDecimals } = getMarketUnits(symbol);
+
+  const isLong = side === "long" || side === "buy";
+  const closeSide = isLong ? Side.Ask : Side.Bid;
+
+  // Direction: TP triggers when price moves favorably, SL when it moves adversely
+  const executionDirection = isTakeProfit
+    ? (isLong ? Direction.GreaterThan : Direction.LessThan)
+    : (isLong ? Direction.LessThan : Direction.GreaterThan);
+
+  return c.ixs.buildPlaceStopLoss({
+    authority,
+    symbol: phoenixSymbol(symbol),
+    tradeSide: closeSide,
+    executionDirection,
+    triggerPrice: ticks(usdToTicks(triggerPrice, tickSize, baseLotsDecimals)),
+    executionPrice: ticks(usdToTicks(triggerPrice, tickSize, baseLotsDecimals)),
+    orderKind: StopLossOrderKind.Limit,
+  });
+}
+
+/**
+ * Build a position conditional order (SL + TP) in a single instruction.
+ * Uses the exchange cache for tickSize / baseLotsDecimals conversion.
+ */
+export async function buildPositionConditionalOrder(symbol, authority, side, stopLoss, takeProfit) {
+  const c = getClient();
+  const { tickSize, baseLotsDecimals } = getMarketUnits(symbol);
+
+  const isLong = side === "long" || side === "buy";
+  const closeSide = isLong ? Side.Ask : Side.Bid;
+
+  const greaterTriggerOrder = takeProfit
+    ? {
+        triggerDirection: Direction.GreaterThan,
+        tradeSide: closeSide,
+        orderKind: StopLossOrderKind.Limit,
+        triggerPrice: ticks(usdToTicks(takeProfit, tickSize, baseLotsDecimals)),
+        executionPrice: ticks(usdToTicks(takeProfit, tickSize, baseLotsDecimals)),
+      }
+    : null;
+
+  const lessTriggerOrder = stopLoss
+    ? {
+        triggerDirection: Direction.LessThan,
+        tradeSide: closeSide,
+        orderKind: StopLossOrderKind.Limit,
+        triggerPrice: ticks(usdToTicks(stopLoss, tickSize, baseLotsDecimals)),
+        executionPrice: ticks(usdToTicks(stopLoss, tickSize, baseLotsDecimals)),
+      }
+    : null;
+
+  // Don't pass sizeBaseLots — Phoenix infers full position size automatically.
+  // Passing explicit size risks rounding mismatch (position 733 lots vs conditional 734).
+  return c.ixs.buildPlacePositionConditionalOrder({
+    authority,
+    symbol: phoenixSymbol(symbol),
+    greaterTriggerOrder,
+    lessTriggerOrder,
+  });
+}
+
+export { Side, Direction, StopLossOrderKind, phoenixSymbol, buildStopLossOrder };

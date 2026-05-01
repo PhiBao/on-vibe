@@ -10,7 +10,6 @@ const NAV = [
   { href: "/trade", label: "trade", icon: "⚡" },
   { href: "/positions", label: "positions", icon: "◉" },
   { href: "/bots", label: "bots", icon: "▣" },
-  { href: "/journal", label: "journal", icon: "◫" },
   { href: "/backtest", label: "backtest", icon: "◊" },
 ];
 

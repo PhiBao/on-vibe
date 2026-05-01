@@ -213,8 +213,8 @@ export class RiskManager {
     try {
       const data = readRiskState();
       if (data) Object.assign(this, data);
-    } catch (e) {
-      console.warn("⚠ Could not load risk state:", e.message);
+    } catch {
+      // Risk state load failed — use defaults
     }
   }
 }

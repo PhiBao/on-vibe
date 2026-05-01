@@ -32,8 +32,8 @@ export async function GET(request: Request) {
           };
         }
       }
-    } catch (metaErr: any) {
-      console.warn("[BALANCE] Market metadata fetch failed:", metaErr.message || metaErr);
+    } catch {
+      // Market metadata is best-effort
     }
 
     const traderState = await client.api.traders().getTraderStateSnapshot(address);
@@ -133,13 +133,7 @@ export async function GET(request: Request) {
       }
     }
 
-    // If no positions found, dump raw trader state for debugging
-    if (positions.length === 0 && subaccounts.length === 0) {
-      try {
-        const rawKeys = Object.keys(tsAny);
-        console.warn("[BALANCE] No positions found. Top-level keys:", rawKeys);
-      } catch {}
-    }
+    // If no positions found, return empty (no debug output)
 
     return NextResponse.json({
       address,
@@ -149,7 +143,6 @@ export async function GET(request: Request) {
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("[WALLET BALANCE ERROR]", message);
     return NextResponse.json({ address, usdc: 0, positions: [], error: message });
   }
 }

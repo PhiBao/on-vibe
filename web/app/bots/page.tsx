@@ -55,7 +55,7 @@ function saveLogs(logs: string[]) {
 
 export default function BotsPage() {
   const { publicKey, connected } = useWallet();
-  const { sendInstructions } = usePhoenixTx();
+  const { sendInstructions, getSolBalance } = usePhoenixTx();
 
   const [config, setConfig] = useState<BotConfig>(DEFAULT_CONFIG);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
@@ -216,6 +216,7 @@ export default function BotsPage() {
     setExecutingId(sig.id);
     setExecuteError(null);
     try {
+      // Phase 1: Execute market order
       const res = await fetch("/api/bot/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -225,8 +226,6 @@ export default function BotsPage() {
           side: sig.side,
           size: sig.size,
           price: sig.entryPrice,
-          stopLoss: sig.stopLoss,
-          takeProfit: sig.takeProfit,
           leverage: sig.leverage,
           wallet: publicKey.toBase58(),
         }),
@@ -236,14 +235,48 @@ export default function BotsPage() {
         setExecuteError(data.error || `Server error ${res.status}`);
         return;
       }
-      if (data.success && data.instructions) {
-        const { signature, error } = await sendInstructions(data.instructions);
-        if (signature) {
-          setSignals((prev) => prev.filter((s) => s.id !== sig.id));
-        } else {
-          setExecuteError(error || "Transaction failed");
+      if (!data.success || !data.instructions) {
+        setExecuteError(data.error || "Failed to build order");
+        return;
+      }
+
+      const { signature, error } = await sendInstructions(data.instructions);
+      if (!signature) {
+        setExecuteError(error || "Transaction failed");
+        return;
+      }
+
+      // Phase 2: Auto-set SL/TP after position is open
+      const hasSlTp = sig.stopLoss || sig.takeProfit;
+      if (hasSlTp && publicKey) {
+        try {
+          await new Promise((r) => setTimeout(r, 2000));
+          const solBalance = await getSolBalance();
+          const minSolNeeded = 0.003;
+          if (solBalance >= minSolNeeded) {
+            await new Promise((r) => setTimeout(r, 3000));
+            const sltpRes = await fetch("/api/positions/sl-tp", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                symbol: sig.symbol,
+                side: sig.side,
+                stopLoss: sig.stopLoss,
+                takeProfit: sig.takeProfit,
+                wallet: publicKey.toBase58(),
+              }),
+            });
+            const sltpData = await sltpRes.json();
+            if (sltpData.success && sltpData.instructions) {
+              await sendInstructions(sltpData.instructions);
+            }
+          }
+        } catch {
+          // SL/TP failed silently — market order succeeded
         }
       }
+
+      setSignals((prev) => prev.filter((s) => s.id !== sig.id));
     } catch (err: unknown) {
       setExecuteError(err instanceof Error ? err.message : "Request failed");
     } finally {

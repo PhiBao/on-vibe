@@ -30,30 +30,16 @@ export async function POST(request: Request) {
 
       const traderState = await client.api.traders().getTraderStateSnapshot(walletAddress);
 
-      // Raw debug dump — log the top-level keys so we know the structure
-      log(`  [debug] traderState keys: ${Object.keys(traderState as any).join(", ")}`);
       const tsAny = traderState as any;
-      if (tsAny.snapshot) {
-        log(`  [debug] snapshot keys: ${Object.keys(tsAny.snapshot).join(", ")}`);
-      }
 
       // Try multiple response structures
       let subaccounts: any[] = [];
       if (tsAny?.snapshot?.subaccounts && Array.isArray(tsAny.snapshot.subaccounts)) {
         subaccounts = tsAny.snapshot.subaccounts;
-        log(`  [debug] using snapshot.subaccounts (${subaccounts.length})`);
       } else if (tsAny?.subaccounts && Array.isArray(tsAny.subaccounts)) {
         subaccounts = tsAny.subaccounts;
-        log(`  [debug] using root subaccounts (${subaccounts.length})`);
       } else if (tsAny?.traderSubaccounts && Array.isArray(tsAny.traderSubaccounts)) {
         subaccounts = tsAny.traderSubaccounts;
-        log(`  [debug] using traderSubaccounts (${subaccounts.length})`);
-      } else {
-        log(`  [debug] no subaccounts array found — dumping raw state`);
-        try {
-          const rawStr = JSON.stringify(tsAny).slice(0, 500);
-          log(`  [debug] raw: ${rawStr}...`);
-        } catch {}
       }
 
       let usdc = 0;
@@ -64,17 +50,10 @@ export async function POST(request: Request) {
           usdc += collateralRaw / 1e6;
         } catch {}
 
-        // Log subaccount keys to find where positions live
-        log(`  [debug] subaccount keys: ${Object.keys(sub).join(", ")}`);
-
         const posArray = sub.positions ?? sub.openPositions ?? [];
-        log(`  [debug] positions count: ${posArray.length}`);
 
         for (const p of posArray) {
           if (!p) continue;
-          // Log raw position object keys
-          log(`  [debug] position keys: ${Object.keys(p).join(", ")}`);
-
           const symRaw = p.symbol ?? "";
           const sym = typeof symRaw === "string" ? symRaw : String(symRaw);
 
@@ -90,7 +69,6 @@ export async function POST(request: Request) {
 
           // Side is determined by sign — no explicit side field in snapshot
           const side = size > 0 ? "long" : size < 0 ? "short" : "";
-          log(`  [debug] pos parsed: sym=${sym} side=${side} size=${size}`);
           if (sym && size !== 0) {
             onChainPositions.push({ symbol: sym, side });
           }

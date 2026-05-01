@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import { createPhoenixClient, Side, symbol as phoenixSymbol } from "@ellipsis-labs/rise";
+import { Side, symbol as phoenixSymbol } from "@ellipsis-labs/rise";
 import { address } from "@solana/kit";
 import { defaultAuditor } from "@/lib/security";
 import { serializeInstruction } from "@/lib/phoenix-tx";
+import { initPhoenix } from "@/lib/engine/market.js";
 
 export async function POST(request: Request) {
   const body = await request.json();
@@ -26,16 +27,12 @@ export async function POST(request: Request) {
   }
 
   try {
-    const client = createPhoenixClient({
-      apiUrl: "https://perp-api.phoenix.trade",
-      rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://api.mainnet-beta.solana.com",
-    });
-    await client.exchange.ready();
+    const client = await initPhoenix();
 
     const marketSymbol = phoenixSymbol(symbol);
     const authority = address(wallet);
 
-    // Market order only — keep it simple
+    // Market order only — SL/TP set separately after position confirms
     const orderPacket = await client.orderPackets.buildMarketOrderPacket({
       symbol: marketSymbol,
       side: side === "buy" || side === "long" ? Side.Bid : Side.Ask,
@@ -50,11 +47,6 @@ export async function POST(request: Request) {
 
     const instructions = [serializeInstruction(marketIx as any)];
 
-    // Note: SL/TP conditional orders are NOT included in the same tx.
-    // Phoenix conditional orders (stop-loss / take-profit) require separate
-    // transactions and have complex trigger conditions. For now, execute
-    // the market order and manage exits manually or via the Positions page.
-
     return NextResponse.json({
       success: true,
       instructions,
@@ -65,7 +57,6 @@ export async function POST(request: Request) {
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("[EXECUTE ERROR]", err);
     return NextResponse.json({ error: `Order build failed: ${message}` }, { status: 500 });
   }
 }

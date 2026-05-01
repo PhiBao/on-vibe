@@ -1,54 +1,49 @@
-<!-- BEGIN:nextjs-agent-rules -->
-# This is NOT the Next.js you know
-
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
-<!-- END:nextjs-agent-rules -->
-
 # Phoenix Terminal v3 — Agent Guide
 
 ## Project Overview
 
 Cyberpunk trading terminal for Phoenix perpetuals on Solana. **Web-only product** — no CLI bot. The entire trading experience happens in the browser. Stack: Next.js 16 + React 19 + Tailwind v4 + TypeScript + Solana Wallet Adapter + Phoenix Rise SDK.
 
-## Architecture
+## Directory Structure
 
 ```
 web/
 ├── app/                          # Next.js App Router
-│   ├── page.tsx                  # Dashboard (wallet + markets + signals)
-│   ├── trade/page.tsx            # Manual trade execution
-│   ├── positions/page.tsx        # Position monitor
-│   ├── bots/page.tsx             # Bot control + pending signals + auto-execute
-│   ├── journal/page.tsx          # Performance analytics
+│   ├── page.tsx                  # Dashboard (wallet + markets + bot status)
+│   ├── trade/page.tsx            # Manual trade execution with SL/TP
+│   ├── positions/page.tsx        # On-chain position monitor
+│   ├── bots/page.tsx             # Bot control + signals + auto-execute
 │   ├── backtest/page.tsx         # Backtest UI
 │   ├── api/                      # API routes (route.ts)
 │   │   ├── bot/
-│   │   │   ├── toggle/route.ts   # Start/stop bot (writes state file)
+│   │   │   ├── toggle/route.ts   # Start/stop bot
 │   │   │   ├── cycle/route.ts    # Runs one analysis cycle
-│   │   │   ├── signals/route.ts  # Reads pending signals from queue
-│   │   │   ├── execute/route.ts  # Builds Phoenix order packet
+│   │   │   ├── execute/route.ts  # Builds Phoenix market order
 │   │   │   ├── config/route.ts   # Saves bot config
-│   │   │   └── logs/route.ts     # Reads bot log file
-│   │   ├── market/route.ts
-│   │   ├── trade/route.ts
-│   │   ├── wallet/balance/route.ts
+│   │   │   └── status/route.ts   # Reads bot state
+│   │   ├── market/route.ts       # Market data (price, orderbook)
+│   │   ├── markets/route.ts      # All market limits
+│   │   ├── trade/route.ts        # Manual trade order builder
+│   │   ├── wallet/balance/route.ts # On-chain balance + positions
+│   │   ├── positions/sl-tp/route.ts # Stop-loss / take-profit builder
 │   │   └── backtest/route.ts
 │   ├── globals.css               # Cyberpunk design system
-│   ├── layout.tsx                # Terminal layout (suppressHydrationWarning)
+│   ├── layout.tsx                # Terminal layout
 │   └── providers.tsx             # Wallet context provider
 ├── components/
 │   ├── TerminalLayout.tsx        # Sidebar + CRT effects + nav
 │   └── WalletProvider.tsx        # Solana wallet adapters
 ├── lib/
 │   ├── security.ts               # Security auditor module
-│   ├── bot-signals.ts            # Signal queue file I/O
+│   ├── data-store.ts             # Vercel-compatible state storage
+│   ├── phoenix-tx.ts             # Serialize/deserialize Phoenix instructions
+│   ├── use-phoenix-tx.ts         # Wallet signing hook
 │   └── engine/                   # Trading engine (JS modules)
-│       ├── market.js             # Phoenix Rise SDK wrapper
+│       ├── market.js             # Phoenix SDK wrapper + tick conversion
 │       ├── indicators.js         # Technical indicators
-│       ├── signals.js            # 5 strategies + synthesizer
+│       ├── signals.js            # 5 strategies + synthesizer + consensus
 │       ├── funding.js            # Funding rate analysis
 │       ├── risk.js               # Risk management
-│       ├── position.js           # Position management
 │       └── backtest.js           # Backtest engine
 ```
 
@@ -56,19 +51,32 @@ web/
 
 ```
 User clicks [START BOT]
-  → POST /api/bot/toggle (writes bot-state.json: running=true)
+  → POST /api/bot/toggle (writes bot-state)
 Browser starts interval timer
   → POST /api/bot/cycle every N seconds
 Server runs analysis (imports engine modules)
   → Fetches candles, runs 5 strategies, synthesizes
-  → If signal is strong, writes to signal-queue.jsonl
-Browser polls /api/bot/signals
-  → Displays pending signals in UI
+  → Checks on-chain positions (no duplicate signals)
+  → Returns signals + logs in response body
+Browser displays signals in UI
 User clicks [EXECUTE] (or auto-execute if enabled)
-  → POST /api/bot/execute builds Phoenix order packet
-  → Browser signs transaction with wallet adapter
-  → Transaction submitted on-chain
+  → Phase 1: POST /api/bot/execute → market order → wallet signs → on-chain
+  → Phase 2: POST /api/positions/sl-tp → conditional orders → wallet signs → on-chain
 ```
+
+## SL/TP Architecture
+
+Phoenix requires **two separate transactions**:
+1. **Market order** — opens the position (`buildPlaceMarketOrder`)
+2. **Conditional orders** — attaches SL/TP (`buildPlaceStopLoss` per direction)
+
+The `buildPlacePositionConditionalOrder` (single-instruction SL+TP) fails because Phoenix's risk engine requires the position to exist before validating conditional orders.
+
+**Tick conversion:** Phoenix stores prices in ticks, not USD. Conversion formula:
+```javascript
+ticks = priceUsd * 1_000_000 / (tickSize * 10^baseLotsDecimals)
+```
+This is implemented in `web/lib/engine/market.js` via `usdToTicks()`.
 
 ## Design System (Cyberpunk Terminal)
 
@@ -102,20 +110,23 @@ User clicks [EXECUTE] (or auto-execute if enabled)
 
 ### Hydration Safety
 - Always add `suppressHydrationWarning` to `<html>` and `<body>` in `layout.tsx`
-- Browser extensions inject attributes that cause hydration mismatches
 
 ## API Route Conventions
 
 ### Bot Routes
-- `POST /api/bot/toggle` — Flips `running` flag in `bot-state.json`, saves config
-- `POST /api/bot/cycle` — Imports engine modules, runs one analysis cycle, writes signals
-- `GET /api/bot/signals` — Reads `signal-queue.jsonl`, filters pending, expires old (>5min)
-- `POST /api/bot/execute` — Builds Phoenix order packet, marks signal executed
-- `GET /api/bot/logs` — Reads last 200 lines from `bot-log.jsonl`
+- `POST /api/bot/toggle` — Flips `running` flag, saves config
+- `POST /api/bot/cycle` — Runs one analysis cycle, returns signals/logs in body
+- `POST /api/bot/execute` — Builds Phoenix market order packet only
+- `GET /api/bot/status` — Reads bot state
+- `POST /api/bot/config` — Saves/reads bot config
+
+### SL/TP Route
+- `POST /api/positions/sl-tp` — Builds `buildPlaceStopLoss` instructions for SL and TP separately
 
 ### Data Directory
 - Runtime data stored in `../data/` (relative to `web/`)
-- Files: `trades.jsonl`, `risk-state.json`, `bot-state.json`, `bot-log.jsonl`, `signal-queue.jsonl`, `bot-config.json`
+- Files: `bot-state.json`, `bot-config.json`, `risk-state.json`
+- Bot logs and signals are **client-side only** (localStorage/React state)
 
 ### Security Requirements
 - ALL user inputs must pass `defaultAuditor.auditOrder()`
@@ -135,14 +146,22 @@ User clicks [EXECUTE] (or auto-execute if enabled)
 - Always `await client.exchange.ready()` before API calls
 - Order packets: `client.orderPackets.buildMarketOrderPacket({ symbol, side, baseUnits })`
 - Trader state: `client.api.traders().getTraderStateSnapshot(address)`
+- Conditional orders: `client.ixs.buildPlaceStopLoss({ authority, symbol, triggerPrice, executionDirection, orderKind })`
+
+### Transaction Flow
+```
+Server builds instructions → serializeInstruction() → JSON
+Frontend deserializes → wallet.signTransaction() → connection.sendRawTransaction()
+```
 
 ## State Management
 
 - No global state library — React hooks + API polling
-- Bot state: `data/bot-state.json` (running, cycle, config)
-- Signal queue: `data/signal-queue.jsonl` (append-only, status updates rewrite file)
-- Trade history: `data/trades.jsonl`
-- Polling intervals: dashboard 30s, signals/logs 3s, wallet 15s, bot cycles: user-configured
+- Bot state: `data/bot-state.json` (running, cycle)
+- Bot config: `data/bot-config.json`
+- Signals: **client-side only** — React state, replaced per cycle, not persisted
+- Bot logs: **client-side only** — localStorage (last 50 entries)
+- Trade history: **on-chain** — fetched from Phoenix API
 
 ## Coding Conventions
 
@@ -162,8 +181,12 @@ User clicks [EXECUTE] (or auto-execute if enabled)
 | `web/app/globals.css` | Cyberpunk design system |
 | `web/components/TerminalLayout.tsx` | App shell with CRT effects |
 | `web/lib/security.ts` | Security audit module |
-| `web/lib/bot-signals.ts` | Signal queue I/O |
-| `web/lib/engine/signals.js` | 5-strategy swarm engine |
-| `web/lib/engine/risk.js` | Risk management |
+| `web/lib/data-store.ts` | Vercel-compatible state storage |
+| `web/lib/phoenix-tx.ts` | Instruction serialization |
+| `web/lib/use-phoenix-tx.ts` | Wallet signing hook |
+| `web/lib/engine/market.js` | Phoenix SDK wrapper + tick conversion |
+| `web/lib/engine/signals.js` | 5-strategy swarm engine + consensus |
 | `web/app/api/bot/cycle/route.ts` | Bot analysis cycle |
-| `web/app/api/bot/execute/route.ts` | Signal → order packet |
+| `web/app/api/bot/execute/route.ts` | Market order builder |
+| `web/app/api/positions/sl-tp/route.ts` | SL/TP conditional order builder |
+| `web/app/api/wallet/balance/route.ts` | On-chain balance + positions |

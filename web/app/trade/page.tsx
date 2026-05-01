@@ -19,7 +19,7 @@ function TradeContent() {
   const defaultSymbol = searchParams.get("symbol") || "SOL";
   const { publicKey, connected } = useWallet();
   const { setVisible } = useWalletModal();
-  const { sendInstructions } = usePhoenixTx();
+  const { sendInstructions, getSolBalance } = usePhoenixTx();
 
   const [symbol, setSymbol] = useState(defaultSymbol);
   const [side, setSide] = useState<"buy" | "sell">("buy");
@@ -97,6 +97,7 @@ function TradeContent() {
     setSubmitting(true);
     setResult(null);
     try {
+      // Phase 1: Market order
       const res = await fetch("/api/trade", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -104,25 +105,61 @@ function TradeContent() {
           symbol, side,
           size: sizeUnits,
           price,
-          stopLoss: stopLoss ? parseFloat(stopLoss) : null,
-          takeProfit: takeProfit ? parseFloat(takeProfit) : null,
           leverage: maxLeverage,
           wallet: publicKey?.toBase58(),
         }),
       });
       const data = await res.json();
-      if (data.success && data.instructions) {
-        setResult("[OK] Building transaction... Please sign in your wallet");
-        const { signature, error } = await sendInstructions(data.instructions);
-        if (signature) {
-          setResult(`[OK] ${side === "buy" ? "LONG" : "SHORT"} ${sizeUnits.toFixed(4)} ${symbol} @ $${price.toFixed(2)} — Tx: ${signature.slice(0, 8)}...`);
-        } else {
-          setResult(`[ERR] ${error || "Transaction failed"}`);
-        }
-      } else {
-        setResult(`[ERR] ${data.error}`);
+      if (!data.success || !data.instructions) {
+        setResult(`[ERR] ${data.error || "Failed to build order"}`);
+        setSubmitting(false);
+        return;
       }
-      if (data.success) setSizeUnits(0);
+
+      setResult("[OK] Building transaction... Please sign in your wallet");
+      const { signature, error } = await sendInstructions(data.instructions);
+      if (!signature) {
+        setResult(`[ERR] ${error || "Transaction failed"}`);
+        setSubmitting(false);
+        return;
+      }
+
+      setResult(`[OK] ${side === "buy" ? "LONG" : "SHORT"} ${sizeUnits.toFixed(4)} ${symbol} @ $${price.toFixed(2)} — Tx: ${signature.slice(0, 8)}...`);
+
+      // Phase 2: SL/TP conditional order (after position is open)
+      const hasSlTp = stopLoss || takeProfit;
+      if (hasSlTp && publicKey) {
+        try {
+          await new Promise((r) => setTimeout(r, 2000));
+          const solBalance = await getSolBalance();
+          const minSolNeeded = 0.003;
+          if (solBalance >= minSolNeeded) {
+            await new Promise((r) => setTimeout(r, 3000));
+            const sltpRes = await fetch("/api/positions/sl-tp", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                symbol,
+                side,
+                stopLoss: stopLoss ? parseFloat(stopLoss) : null,
+                takeProfit: takeProfit ? parseFloat(takeProfit) : null,
+                wallet: publicKey.toBase58(),
+              }),
+            });
+            const sltpData = await sltpRes.json();
+            if (sltpData.success && sltpData.instructions) {
+              const { signature: sltpSig } = await sendInstructions(sltpData.instructions);
+              if (sltpSig) {
+                setResult((prev) => `${prev}\n[OK] SL/TP set — Tx: ${sltpSig.slice(0, 8)}...`);
+              }
+            }
+          }
+        } catch {
+          // SL/TP failed silently
+        }
+      }
+
+      setSizeUnits(0);
     } catch { setResult("[ERR] Trade execution failed"); }
     setSubmitting(false);
   };
