@@ -53,19 +53,37 @@ function saveLogs(logs: string[]) {
   try { localStorage.setItem("bot-logs", JSON.stringify(logs.slice(-30))); } catch {}
 }
 
+function loadConfig(): BotConfig {
+  try {
+    const raw = localStorage.getItem("bot-config");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        minConfidence: typeof parsed.minConfidence === "number" ? parsed.minConfidence : DEFAULT_CONFIG.minConfidence,
+        maxMarginPct: typeof parsed.maxMarginPct === "number" ? parsed.maxMarginPct : DEFAULT_CONFIG.maxMarginPct,
+        symbols: Array.isArray(parsed.symbols) ? parsed.symbols : DEFAULT_CONFIG.symbols,
+        interval: typeof parsed.interval === "number" ? parsed.interval : DEFAULT_CONFIG.interval,
+      };
+    }
+  } catch {}
+  return DEFAULT_CONFIG;
+}
+
+function persistConfig(config: BotConfig) {
+  try { localStorage.setItem("bot-config", JSON.stringify(config)); } catch {}
+}
+
 export default function BotsPage() {
   const { publicKey, connected } = useWallet();
   const { sendInstructions, getSolBalance } = usePhoenixTx();
 
-  const [config, setConfig] = useState<BotConfig>(DEFAULT_CONFIG);
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [config, setConfig] = useState<BotConfig>(loadConfig);
   const [running, setRunning] = useState(() => {
     try { return JSON.parse(localStorage.getItem("bot-running") || "false"); } catch { return false; }
   });
 
   const [logs, setLogs] = useState<string[]>(loadLogs);
   const [signals, setSignals] = useState<TradeSignal[]>([]);
-  const [loading, setLoading] = useState(true);
   const [autoExecute, setAutoExecute] = useState(false);
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [executeError, setExecuteError] = useState<string | null>(null);
@@ -80,27 +98,13 @@ export default function BotsPage() {
     try { localStorage.setItem("bot-running", JSON.stringify(running)); } catch {}
   }, [running]);
 
-  // Persist logs (last 5 only)
+  // Persist logs (last 30 only)
   useEffect(() => { saveLogs(logs); }, [logs]);
 
-  // Fetch config once on mount
+  // Persist config to localStorage on every change
   useEffect(() => {
-    fetch("/api/bot/config")
-      .then((r) => r.json())
-      .then((data) => {
-        if (data && typeof data === "object") {
-          const mapped: Partial<BotConfig> = {};
-          if (typeof data.minConfidence === "number") mapped.minConfidence = data.minConfidence;
-          if (typeof data.maxMarginPct === "number") mapped.maxMarginPct = data.maxMarginPct;
-          else if (typeof data.maxPositionPct === "number") mapped.maxMarginPct = data.maxPositionPct;
-          if (Array.isArray(data.symbols)) mapped.symbols = data.symbols;
-          if (typeof data.interval === "number") mapped.interval = data.interval;
-          setConfig((prev) => ({ ...prev, ...mapped }));
-        }
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+    persistConfig(config);
+  }, [config]);
 
   // Fetch market limits
   const fetchMarketLimits = useCallback(async () => {
@@ -206,7 +210,7 @@ export default function BotsPage() {
       await fetch("/api/bot/toggle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ config }),
+        body: JSON.stringify({ running: nextRunning }),
       });
     } catch {}
   };
@@ -286,27 +290,9 @@ export default function BotsPage() {
 
   const updateConfig = (patch: Partial<BotConfig>) => {
     setConfig((prev) => ({ ...prev, ...patch }));
-    setHasUnsavedChanges(true);
-  };
-
-  const saveConfig = async () => {
-    try {
-      await fetch("/api/bot/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
-      });
-      setHasUnsavedChanges(false);
-    } catch {}
   };
 
   const clearLogs = () => setLogs([]);
-
-  if (loading) return (
-    <div className="flex items-center justify-center h-[80vh] text-[var(--text-dim)] font-mono">
-      <span className="text-[var(--cyan)]">&gt;</span> initializing bot module...<span className="animate-blink">_</span>
-    </div>
-  );
 
   return (
     <div className="max-w-6xl mx-auto space-y-6 animate-in">
@@ -472,12 +458,7 @@ export default function BotsPage() {
               <input type="range" min={10} max={300} step={10} value={config.interval} onChange={(e) => updateConfig({ interval: parseInt(e.target.value) })} className="w-full" />
             </div>
 
-            <button
-              onClick={saveConfig}
-              className={`btn-terminal w-full text-[11px] ${hasUnsavedChanges ? "border-[var(--yellow)] text-[var(--yellow)]" : ""}`}
-            >
-              [ SAVE CONFIG {hasUnsavedChanges ? "*" : ""} ]
-            </button>
+
           </div>
         </div>
 
