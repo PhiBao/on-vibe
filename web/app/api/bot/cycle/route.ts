@@ -168,7 +168,13 @@ export async function POST(request: Request) {
       log(`  ${symbol}: $${price.toFixed(2)} ${combined.signal > 0 ? "▲" : combined.signal < 0 ? "▼" : "◆"} sig:${combined.signal.toFixed(2)} conf:${(combined.confidence * 100).toFixed(1)}% maxLev:${marketMaxLev}x | ${stratLog}`);
 
       if (combined.action === "hold" || combined.confidence < minConfidence) {
-        if (combined.action !== "hold") log(`    ⏸ Below threshold (${(combined.confidence * 100).toFixed(1)}% < ${(minConfidence * 100).toFixed(1)}%)`);
+        if (combined.confidence < minConfidence) {
+          log(`    ⏸ Below threshold (${(combined.confidence * 100).toFixed(1)}% < ${(minConfidence * 100).toFixed(1)}%)`);
+        } else if (combined.holdReason) {
+          log(`    ⏸ Hold: ${combined.holdReason} (sig:${combined.signal.toFixed(2)} conf:${(combined.confidence * 100).toFixed(1)}% votes:▲${combined.longVotes}▼${combined.shortVotes})`);
+        } else {
+          log(`    ⏸ Hold: weak signal (sig:${combined.signal.toFixed(2)})`);
+        }
         continue;
       }
 

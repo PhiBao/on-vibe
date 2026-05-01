@@ -258,10 +258,24 @@ export function synthesizeSignals(strategies, currentPrice, options = {}) {
 
   const adjustedConfidence = Math.min(1, avgConfidence + agreementBonus);
 
-  // Determine action
+  // Consensus filter: require at least 2 strategies to agree on the FINAL direction,
+  // OR a very strong weighted signal, OR only 1 strategy is active (no one to disagree with)
+  const supportingCount = strategies.filter(s =>
+    finalSignal > 0 ? s.signal > 0 : s.signal < 0
+  ).length;
+  const strongDisagreement = (longCount >= 1 && shortCount >= 1) && Math.abs(finalSignal) < 0.4;
+  const hasConsensus = supportingCount >= 2 || Math.abs(finalSignal) >= 0.6 || activeCount === 1;
+
+  // Determine action — use inclusive threshold so edge cases like -0.30 trigger
   let action = "hold";
-  if (finalSignal > 0.3 && adjustedConfidence > 0.5) action = "long";
-  else if (finalSignal < -0.3 && adjustedConfidence > 0.5) action = "short";
+  if (finalSignal >= 0.25 && adjustedConfidence >= 0.5 && hasConsensus) action = "long";
+  else if (finalSignal <= -0.25 && adjustedConfidence >= 0.5 && hasConsensus) action = "short";
+
+  // Hold reason for logging
+  let holdReason = "";
+  if (Math.abs(finalSignal) < 0.25) holdReason = "weak_signal";
+  else if (adjustedConfidence < 0.5) holdReason = "low_confidence";
+  else if (!hasConsensus) holdReason = strongDisagreement ? "strong_disagreement" : "no_consensus";
 
   // Best stop loss from highest confidence strategy
   const bestStrategy = strategies.filter(s => s.stopLoss).sort((a, b) => b.confidence - a.confidence)[0];
@@ -286,5 +300,7 @@ export function synthesizeSignals(strategies, currentPrice, options = {}) {
     details,
     longVotes: longCount,
     shortVotes: shortCount,
+    hasConsensus,
+    holdReason,
   };
 }
